@@ -10,6 +10,7 @@ services:
 
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-flowdesk}:${POSTGRES_PASSWORD:-flowdesk}@postgres:5432/${POSTGRES_DB:-flowdesk}
+      SESSION_SECRET: ${SESSION_SECRET:-flowdesk}
 
     ports:
       - "9003:9003"

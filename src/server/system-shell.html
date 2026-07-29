@@ -33,11 +33,12 @@
     </nav>
     <div class="sidebar-footer">
       <div class="user-mini">
-        <div class="avatar">GS</div>
+        <div class="avatar" id="currentUserAvatar">—</div>
         <div>
-          <div class="user-name">Giovana Silva</div>
-          <div class="user-role">Analista</div>
+          <div class="user-name" id="currentUserName">—</div>
+          <div class="user-role" id="currentUserRole">—</div>
         </div>
+        <button class="icon-btn" id="logoutBtn" title="Sair" style="margin-left:auto"><i class="fa-solid fa-right-from-bracket"></i></button>
       </div>
     </div>
   </aside>
@@ -68,9 +69,9 @@
 <div id="confirmRoot"></div>
 <div id="notifPanel" class="notif-panel hidden"></div>
 
-<script src="./utils.js"></script>
-<script src="./data.js"></script>
-<script src="./components.js"></script>
-<script src="./script.js"></script>
+<script src="/system/utils.js"></script>
+<script src="/system/data.js"></script>
+<script src="/system/components.js"></script>
+<script src="/system/script.js"></script>
 </body>
 </html>

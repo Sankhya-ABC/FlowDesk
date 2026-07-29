@@ -3,6 +3,12 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleApi } from "./server/db/api";
+import { handleAuthApi } from "./server/auth/api";
+import { getAuthenticatedEquipeId } from "./server/auth/session";
+// `?raw` inlines the HTML at build time — this file is deliberately NOT under
+// public/, because nitro serves public/ assets before this fetch() ever runs,
+// which would bypass the auth gate below for a plain static file.
+import systemShellHtml from "./server/system-shell.html?raw";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -47,9 +53,31 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
-    if (new URL(request.url).pathname.startsWith("/api/")) {
+    const { pathname } = new URL(request.url);
+
+    if (pathname.startsWith("/api/auth/")) {
+      return handleAuthApi(request);
+    }
+
+    if (pathname.startsWith("/api/")) {
+      if (!getAuthenticatedEquipeId(request)) {
+        return new Response(JSON.stringify({ error: "Não autenticado" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return handleApi(request);
     }
+
+    if (pathname === "/system" || pathname === "/system/" || pathname === "/system/index.html") {
+      if (!getAuthenticatedEquipeId(request)) {
+        return Response.redirect(new URL("/login.html", request.url), 302);
+      }
+      return new Response(systemShellHtml, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);

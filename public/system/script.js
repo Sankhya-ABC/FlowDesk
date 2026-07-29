@@ -14,9 +14,23 @@ const App = {
   async init() {
     await Store.load();
     this.bindShell();
+    await this.loadCurrentUser();
     this.applyTheme();
     this.render();
     this.updateNotifBadge();
+  },
+
+  async loadCurrentUser() {
+    try {
+      const res = await fetch('/api/auth/me');
+      if (!res.ok) return window.location.replace('/login.html');
+      const user = await res.json();
+      $('#currentUserAvatar').textContent = initials(user.nome || '');
+      $('#currentUserName').textContent = user.nome || '—';
+      $('#currentUserRole').textContent = user.cargo || '—';
+    } catch {
+      // Sem rede: deixa seguir em modo offline (Store já cuida disso) sem forçar logout.
+    }
   },
 
   bindShell() {
@@ -26,6 +40,10 @@ const App = {
     $('#menuToggle').onclick = () => $('#sidebar').classList.toggle('open');
     $('#globalSearch').addEventListener('input', debounce(e => this.globalSearch(e.target.value), 200));
     $('#notifBtn').onclick = () => this.toggleNotifs();
+    $('#logoutBtn').onclick = async () => {
+      try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
+      window.location.href = '/login.html';
+    };
   },
 
   go(view) {

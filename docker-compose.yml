@@ -9,6 +9,7 @@ services:
     container_name: flowdesk-dev
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-flowdesk}:${POSTGRES_PASSWORD:-flowdesk}@postgres:5432/${POSTGRES_DB:-flowdesk}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-only-insecure-secret-change-me}
     ports:
       - "8080:8080"
     volumes:
