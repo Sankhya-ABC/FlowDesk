@@ -1,0 +1,12 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: flowdesk
+
+    restart: unless-stopped
+
+    ports:
+      - "9003:9003"
