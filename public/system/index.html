@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FlowDesk — Gestão de Projetos e Demandas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-logo"><i class="fa-solid fa-bolt"></i></div>
+      <div class="brand-name">FlowDesk</div>
+    </div>
+    <nav class="nav">
+      <a class="nav-item active" data-view="dashboard"><i class="fa-solid fa-gauge-high"></i><span>Dashboard</span></a>
+      <a class="nav-item" data-view="clientes"><i class="fa-solid fa-users"></i><span>Clientes</span></a>
+      <a class="nav-item" data-view="projetos"><i class="fa-solid fa-diagram-project"></i><span>Projetos</span></a>
+      <a class="nav-item" data-view="demandas"><i class="fa-solid fa-list-check"></i><span>Demandas</span></a>
+      <a class="nav-item" data-view="kanban"><i class="fa-solid fa-columns"></i><span>Kanban</span></a>
+      <a class="nav-item" data-view="calendario"><i class="fa-solid fa-calendar-days"></i><span>Calendário</span></a>
+      <a class="nav-item" data-view="timeline"><i class="fa-solid fa-timeline"></i><span>Timeline</span></a>
+      <a class="nav-item" data-view="reunioes"><i class="fa-solid fa-calendar-check"></i><span>Reuniões</span></a>
+      <a class="nav-item" data-view="equipe"><i class="fa-solid fa-user-group"></i><span>Equipe</span></a>
+      <a class="nav-item" data-view="relatorios"><i class="fa-solid fa-chart-line"></i><span>Relatórios</span></a>
+      <a class="nav-item" data-view="config"><i class="fa-solid fa-gear"></i><span>Configurações</span></a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-mini">
+        <div class="avatar">GS</div>
+        <div>
+          <div class="user-name">Giovana Silva</div>
+          <div class="user-role">Analista</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="menuToggle"><i class="fa-solid fa-bars"></i></button>
+      <div class="search">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <input id="globalSearch" placeholder="Pesquisar clientes, projetos, demandas, responsáveis..." />
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="themeToggle" title="Alternar tema"><i class="fa-solid fa-moon"></i></button>
+        <button class="icon-btn" id="notifBtn" title="Notificações">
+          <i class="fa-solid fa-bell"></i>
+          <span class="badge" id="notifCount">0</span>
+        </button>
+        <button class="btn btn-primary" id="quickAdd"><i class="fa-solid fa-plus"></i> Nova Demanda</button>
+      </div>
+    </header>
+
+    <section class="view" id="view-root"></section>
+  </main>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
+<div id="confirmRoot"></div>
+<div id="notifPanel" class="notif-panel hidden"></div>
+
+<script src="./utils.js"></script>
+<script src="./data.js"></script>
+<script src="./components.js"></script>
+<script src="./script.js"></script>
+</body>
+</html>
