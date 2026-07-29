@@ -48,22 +48,62 @@ function gerarNotificacoes(demandas) {
   }));
 }
 
-/* ------------- Store ------------- */
+/* ------------- Store -------------
+ * Fonte de verdade é o Postgres, via /api/bootstrap + /api/:col. O localStorage
+ * vira só um cache: se a API não responder (servidor fora do ar), o app entra
+ * em modo offline com o último snapshot salvo, em vez de travar. */
 const Store = {
   state: null,
-  load() {
-    const cached = storage.get(DB_KEY);
-    this.state = cached && cached.clientes ? cached : seed();
+  offline: false,
+
+  async load() {
+    let remote = null;
+    try {
+      const res = await fetch('/api/bootstrap', { signal: AbortSignal.timeout(8000) });
+      if (res.ok) remote = await res.json();
+    } catch { /* sem rede / API fora do ar */ }
+
+    if (remote) {
+      this.offline = false;
+      this.state = {
+        clientes: remote.clientes || [],
+        projetos: remote.projetos || [],
+        demandas: remote.demandas || [],
+        equipe: remote.equipe || [],
+        reunioes: remote.reunioes || [],
+      };
+
+      // Banco vazio (primeira execução): populamos a equipe fixa padrão e já
+      // persistimos no servidor, pra não sumir com o time em todo load vazio.
+      const isEmpty = !this.state.clientes.length && !this.state.projetos.length &&
+        !this.state.demandas.length && !this.state.equipe.length;
+      if (isEmpty) {
+        this.state.equipe = seed().equipe;
+        this.state.equipe.forEach(p => this.upsert('equipe', p));
+      }
+    } else {
+      this.offline = true;
+      const cached = storage.get(DB_KEY);
+      this.state = cached && cached.clientes ? cached : seed();
+      if (typeof UI !== 'undefined') UI.toast('Sem conexão com o servidor — trabalhando offline', 'warn');
+    }
+
+    this._derive();
+  },
+
+  // Recalcula campos derivados (status "atrasado", notificações) e persiste no cache local.
+  _derive() {
     if (!this.state.reunioes) this.state.reunioes = [];
-    // Update dynamic "atrasado" status derived from prazo
     this.state.demandas.forEach(d => {
       if (isLate(d) && d.status !== 'concluido' && d.status !== 'cancelado') d._late = true;
       else d._late = false;
     });
+    this.state.notificacoes = gerarNotificacoes(this.state.demandas);
     this.save();
   },
+
   save() { storage.set(DB_KEY, this.state); },
-  reset() { storage.del(DB_KEY); this.load(); },
+  reset() { storage.del(DB_KEY); this.state = seed(); this._derive(); },
 
   clientes: () => Store.state.clientes,
   projetos: () => Store.state.projetos,
@@ -81,12 +121,30 @@ const Store = {
   upsert(col, row) {
     const arr = Store.state[col];
     const i = arr.findIndex(x=>x.id===row.id);
-    if (i>=0) arr[i] = { ...arr[i], ...row };
-    else arr.push({ ...row, id: row.id || uid(col[0]) });
+    const saved = { ...(i>=0 ? arr[i] : {}), ...row, id: row.id || uid(col[0]) };
+    if (i>=0) arr[i] = saved; else arr.push(saved);
     Store.save();
+
+    fetch(`/api/${col}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(saved),
+    })
+      .then(res => { if (!res.ok) throw new Error(`save ${col} failed: ${res.status}`); })
+      .catch(err => {
+        console.error(err);
+        if (typeof UI !== 'undefined') UI.toast('Falha ao salvar no servidor — alteração ficou só local', 'warn');
+      });
   },
   remove(col, id) {
     Store.state[col] = Store.state[col].filter(x=>x.id!==id);
     Store.save();
+
+    fetch(`/api/${col}/${id}`, { method: 'DELETE' })
+      .then(res => { if (!res.ok) throw new Error(`delete ${col} failed: ${res.status}`); })
+      .catch(err => {
+        console.error(err);
+        if (typeof UI !== 'undefined') UI.toast('Falha ao excluir no servidor', 'warn');
+      });
   },
 };

@@ -12,4 +12,10 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // We always run the build under Bun (self-hosted, never real Cloudflare Workers), so target
+  // the "bun" preset instead of the default "cloudflare-module" — avoids node:net/tls being
+  // polyfilled away for a Workers runtime we never actually use, which the Postgres driver needs.
+  nitro: {
+    preset: "bun",
+  },
 });

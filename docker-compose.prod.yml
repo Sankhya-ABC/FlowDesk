@@ -8,5 +8,46 @@ services:
 
     restart: unless-stopped
 
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-flowdesk}:${POSTGRES_PASSWORD:-flowdesk}@postgres:5432/${POSTGRES_DB:-flowdesk}
+
     ports:
       - "9003:9003"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      - flowdesk-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: flowdesk-postgres
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flowdesk}
+      POSTGRES_USER: ${POSTGRES_USER:-flowdesk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flowdesk}
+
+    volumes:
+      - flowdesk_postgres_data_prod:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flowdesk} -d ${POSTGRES_DB:-flowdesk}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    restart: unless-stopped
+
+    networks:
+      - flowdesk-network
+
+volumes:
+  flowdesk_postgres_data_prod:
+    name: flowdesk_postgres_data_prod
+
+networks:
+  flowdesk-network:
+    name: flowdesk-network-prod

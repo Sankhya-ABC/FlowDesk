@@ -11,8 +11,8 @@ const App = {
   sort: { col:null, dir:1 },
   charts: {},
 
-  init() {
-    Store.load();
+  async init() {
+    await Store.load();
     this.bindShell();
     this.applyTheme();
     this.render();

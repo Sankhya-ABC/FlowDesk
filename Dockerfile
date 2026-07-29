@@ -18,9 +18,7 @@ ENV PORT=9003
 ENV NODE_ENV=production
 
 COPY --from=builder /app/.output ./.output
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/server-run.mjs ./server-run.mjs
 
 EXPOSE 9003
 
-CMD ["bun", "run", "server-run.mjs"]
+CMD ["bun", "run", ".output/server/index.mjs"]
