@@ -17,7 +17,7 @@ WORKDIR /app
 ENV PORT=9003
 ENV NODE_ENV=production
 
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/.output ./.output
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/server-run.mjs ./server-run.mjs
 
