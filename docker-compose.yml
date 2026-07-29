@@ -1,0 +1,49 @@
+# Dev: bun run dev com hot reload (código montado como volume) + Postgres.
+# Uso: docker compose up -d  →  http://localhost:8080
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: flowdesk-dev
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-flowdesk}:${POSTGRES_PASSWORD:-flowdesk}@postgres:5432/${POSTGRES_DB:-flowdesk}
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - flowdesk-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: flowdesk-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flowdesk}
+      POSTGRES_USER: ${POSTGRES_USER:-flowdesk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flowdesk}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - flowdesk_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flowdesk} -d ${POSTGRES_DB:-flowdesk}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - flowdesk-network
+
+volumes:
+  flowdesk_postgres_data:
+    name: flowdesk_postgres_data
+
+networks:
+  flowdesk-network:
+    name: flowdesk-network
