@@ -60,7 +60,11 @@ function debounce(fn, ms=200) {
 }
 
 function download(filename, content, mime='text/plain') {
-  const blob = new Blob([content], { type: mime });
+  // O BOM faz o Excel no Windows reconhecer o arquivo como UTF-8 e manter acentos.
+  const isCSV = mime.toLowerCase().startsWith('text/csv');
+  const csvContent = isCSV && !content.startsWith('\uFEFF') ? `\uFEFF${content}` : content;
+  const contentType = isCSV ? 'text/csv;charset=utf-8' : mime;
+  const blob = new Blob([csvContent], { type: contentType });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = filename;
@@ -82,6 +86,8 @@ function parseCSV(text) {
   // Parser char-a-char (não faz split por linha antes de tratar aspas), então
   // campos com quebra de linha, ';', ',' ou '"' escapados dentro de aspas funcionam corretamente.
   if (!text) return [];
+  // CSVs exportados para Excel podem conter BOM no primeiro cabeçalho.
+  text = text.replace(/^\uFEFF/, '');
   const sep = text.slice(0, text.indexOf('\n') > -1 ? text.indexOf('\n') : text.length).includes(';') ? ';' : ',';
   const rows = [];
   let row = [];
@@ -149,9 +155,32 @@ function initials(name='') {
   return name.split(' ').filter(Boolean).slice(0,2).map(p=>p[0]).join('').toUpperCase();
 }
 
+// Quebra um label longo em várias linhas (array), respeitando palavras inteiras.
+// Usado nos eixos de gráficos Chart.js horizontais para evitar texto cortado.
+function wrapLabel(text, maxLen = 20, maxLines = 2) {
+  const words = String(text ?? '').split(' ');
+  const lines = [];
+  let cur = '';
+  words.forEach(w => {
+    const test = cur ? `${cur} ${w}` : w;
+    if (test.length > maxLen && cur) { lines.push(cur); cur = w; }
+    else cur = test;
+  });
+  if (cur) lines.push(cur);
+  if (!lines.length) return [String(text ?? '')];
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    let last = kept[maxLines - 1];
+    if (last.length > maxLen - 1) last = last.slice(0, maxLen - 1);
+    kept[maxLines - 1] = last + '…';
+    return kept;
+  }
+  return lines;
+}
+
 function isLate(demand) {
   if (!demand.prazo) return false;
-  if (demand.status === 'concluido' || demand.status === 'cancelado') return false;
+  if (demand.status === 'concluido' || demand.status === 'cancelado' || demand.status === 'cliente') return false;
   return new Date(demand.prazo) < today();
 }
 
