@@ -499,6 +499,39 @@ body.dark .status.atrasado { background:#450a0a; color:#fca5a5; }
 /* Durante o arraste, a rolagem do Kanban fica contínua nas bordas. */
 .kanban.is-dragging { scroll-snap-type: none; }
 
+.list-entry-input {
+  flex:1;
+  min-width:0;
+  min-height:38px;
+  max-height:180px;
+  padding:8px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--surface-2);
+  color:var(--text);
+  font:inherit;
+  font-size:12px;
+  line-height:1.4;
+  resize:none;
+  overflow-y:auto;
+}
+.list-entry-input:focus { outline:none; border-color:var(--primary); }
+
+/* Impede que textos longos sem espaços escapem dos cartões e painéis. */
+#drawer-body,
+#drawer-body div,
+#drawer-body p,
+#drawer-body span,
+.drawer h3,
+.k-card,
+.k-card-title,
+.reuniao-card-body,
+.reuniao-card-title,
+td {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* Fechar o menu quando o zoom acionar o layout responsivo. */
 .sidebar-close { display:none; }
 @media (max-width: 900px) {

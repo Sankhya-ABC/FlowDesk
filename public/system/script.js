@@ -1538,8 +1538,8 @@ const App = {
       return `
         <div class="section-title">${titulo}</div>
         <div id="list-${campo}">${rows}</div>
-        <div style="display:flex;gap:6px;margin-top:8px;">
-          <input id="new-${campo}" placeholder="${placeholder}" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);"/>
+        <div style="display:flex;gap:6px;margin-top:8px;align-items:flex-start;">
+          <textarea id="new-${campo}" class="list-entry-input" rows="1" placeholder="${placeholder}"></textarea>
           <button class="btn btn-sm btn-primary" data-add="${campo}"><i class="fa-solid fa-plus"></i></button>
         </div>`;
     };
@@ -1636,12 +1636,18 @@ const App = {
           });
         };
         camposLista.forEach(campo => {
+          const input = root.querySelector(`#new-${campo}`);
+          const fitInput = () => {
+            input.style.height = 'auto';
+            input.style.height = `${input.scrollHeight}px`;
+          };
+          input.addEventListener('input', fitInput);
           root.querySelector(`[data-add="${campo}"]`).onclick = () => {
-            const input = root.querySelector(`#new-${campo}`);
             const v = input.value.trim(); if (!v) return;
             if (!m[campo]) m[campo] = [];
             m[campo].push({ id: uid('it'), texto: v });
             input.value = '';
+            fitInput();
             Store.save(); refreshList(campo);
           };
           root.querySelectorAll(`[data-del^="${campo}:"]`).forEach(btn => btn.onclick = () => {
