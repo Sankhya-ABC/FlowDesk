@@ -6,7 +6,9 @@ const App = {
     demandas: { q:'', cliente:'', projeto:'', responsavel:'', status:'', prioridade:'', data:'' },
     projetos: { q:'', cliente:'', status:'', prioridade:'' },
     clientes: { q:'' },
-    timeline: { cliente:'' }
+    timeline: { cliente:'' },
+    kanban: { q:'', cliente:'', projeto:'', responsavel:'', prioridade:'' },
+    calendario: { cliente:'', projeto:'', responsavel:'', prioridade:'' }
   },
   sort: { col:null, dir:1 },
   charts: {},
@@ -14,6 +16,7 @@ const App = {
   async init() {
     await Store.load();
     this.bindShell();
+    this.applySidebarState();
     await this.loadCurrentUser();
     this.applyTheme();
     this.render();
@@ -37,7 +40,8 @@ const App = {
     $$('.nav-item').forEach(n => n.onclick = () => this.go(n.dataset.view));
     $('#quickAdd').onclick = () => this.openDemandaModal();
     $('#themeToggle').onclick = () => this.toggleTheme();
-    $('#menuToggle').onclick = () => $('#sidebar').classList.toggle('open');
+    $('#menuToggle').onclick = () => this.toggleSidebar();
+    this.addSidebarCloseButton();
     $('#globalSearch').addEventListener('input', debounce(e => this.globalSearch(e.target.value), 200));
     $('#notifBtn').onclick = () => this.toggleNotifs();
     $('#logoutBtn').onclick = async () => {
@@ -46,10 +50,46 @@ const App = {
     };
   },
 
+  addSidebarCloseButton() {
+    const sidebar = $('#sidebar');
+    if (!sidebar || sidebar.querySelector('#sidebarClose')) return;
+
+    const button = document.createElement('button');
+    button.id = 'sidebarClose';
+    button.type = 'button';
+    button.className = 'icon-btn sidebar-close';
+    button.setAttribute('aria-label', 'Fechar menu lateral');
+    button.setAttribute('title', 'Fechar menu');
+    button.innerHTML = '<i class="fa-solid fa-xmark" aria-hidden="true"></i>';
+    button.onclick = () => this.closeSidebar();
+    sidebar.prepend(button);
+  },
+
+  toggleSidebar() {
+    const isMobile = window.matchMedia('(max-width: 900px)').matches;
+    if (isMobile) {
+      $('#sidebar').classList.toggle('open');
+    } else {
+      const app = $('#app');
+      const collapsed = app.classList.toggle('sidebar-collapsed');
+      storage.set('flowdesk_sidebar_collapsed', collapsed);
+    }
+  },
+
+  closeSidebar() {
+    $('#sidebar').classList.remove('open');
+  },
+
+  applySidebarState() {
+    if (window.matchMedia('(max-width: 900px)').matches) return;
+    const collapsed = storage.get('flowdesk_sidebar_collapsed') === true;
+    $('#app').classList.toggle('sidebar-collapsed', collapsed);
+  },
+
   go(view) {
     this.view = view;
     $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
-    $('#sidebar').classList.remove('open');
+    this.closeSidebar();
     this.render();
   },
 
@@ -195,7 +235,7 @@ const App = {
         ${kpi('Em andamento', emAndamento, 'spinner','#0ea5e9','Demandas')}
         ${kpi('Concluídas', concluidas, 'check','#10b981','Demandas')}
         ${kpi('Atrasadas', atrasadas, 'triangle-exclamation','#ef4444','Requerem ação')}
-        ${kpi('Pendências', pendentes, 'hourglass-half','#f59e0b','Aguardando')}
+        ${kpi('Pendências', pendentes, 'hourglass-half','#f59e0b','Backlog + Análise + Cliente')}
         ${kpi('SLA médio', slaDias+' d', 'clock','#06b6d4','Prazo médio')}
         ${kpi('Produtividade', produtividade+'%','chart-line','#22c55e','Concluídas/Total')}
       </div>
@@ -271,10 +311,12 @@ const App = {
       respCount[n] = (respCount[n]||0)+1;
     });
     const respEntries = Object.entries(respCount).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    const wrappedTickOpts = { ticks:{ autoSkip:false, font:{ size:10 } } };
+    const wrappedBarOpts = { maxBarThickness:22, categoryPercentage:0.7, barPercentage:0.8 };
     this.charts.resp = new Chart($('#chartResp'), {
       type:'bar',
-      data:{ labels: respEntries.map(e=>e[0]), datasets:[{ label:'Demandas', data: respEntries.map(e=>e[1]), backgroundColor:'#6366f1', borderRadius:6 }] },
-      options:{ maintainAspectRatio:false, indexAxis:'y', plugins:{ legend:{ display:false }}}
+      data:{ labels: respEntries.map(e=>wrapLabel(e[0])), datasets:[{ label:'Demandas', data: respEntries.map(e=>e[1]), backgroundColor:'#6366f1', borderRadius:6, ...wrappedBarOpts }] },
+      options:{ maintainAspectRatio:false, indexAxis:'y', scales:{ y: wrappedTickOpts }, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ title: items => (items[0]?.label instanceof Array ? items[0].label.join(' ') : items[0]?.label) } } } }
     });
 
     // Barras por cliente
@@ -287,8 +329,8 @@ const App = {
     const cliEntries = Object.entries(cliCount).sort((a,b)=>b[1]-a[1]).slice(0,8);
     this.charts.cli = new Chart($('#chartCli'), {
       type:'bar',
-      data:{ labels: cliEntries.map(e=>e[0]), datasets:[{ label:'Demandas', data: cliEntries.map(e=>e[1]), backgroundColor:'#8b5cf6', borderRadius:6 }] },
-      options:{ maintainAspectRatio:false, indexAxis:'y', plugins:{ legend:{ display:false }}}
+      data:{ labels: cliEntries.map(e=>wrapLabel(e[0])), datasets:[{ label:'Demandas', data: cliEntries.map(e=>e[1]), backgroundColor:'#8b5cf6', borderRadius:6, ...wrappedBarOpts }] },
+      options:{ maintainAspectRatio:false, indexAxis:'y', scales:{ y: wrappedTickOpts }, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ title: items => (items[0]?.label instanceof Array ? items[0].label.join(' ') : items[0]?.label) } } } }
     });
 
     // Linha "Evolução semanal" — mostra os ÚLTIMOS 7 DIAS (um ponto por dia, não por semana)
@@ -421,7 +463,21 @@ const App = {
   /* ================== PROJETOS ================== */
   render_projetos(root) {
     const f = this.filters.projetos;
-    const cliOpts = ['<option value="">Todos os clientes</option>'].concat(Store.clientes().map(c=>`<option value="${c.id}" ${c.id===f.cliente?'selected':''}>${escapeHTML(c.empresa)}</option>`)).join('');
+
+    // Agrupa clientes por empresa (nome exato), removendo duplicatas de empresa no dropdown
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa||'').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = [];
+      empresaMap[key].push(c.id);
+    });
+    const empresasUnicas = Object.keys(empresaMap).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+    const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
+
+    const cliOpts = ['<option value="">Todos os clientes</option>'].concat(
+      empresasUnicas.map(emp => `<option value="${escapeHTML(emp)}" ${emp===f.cliente?'selected':''}>${escapeHTML(emp)}</option>`)
+    ).join('');
     const stOpts = [
       '<option value="">Todos status</option>',
       `<option value="__ativos" ${f.status==='__ativos'?'selected':''}>Projetos ativos</option>`
@@ -432,6 +488,7 @@ const App = {
       <div class="page-header">
         <div><h1 class="page-title">Projetos</h1><div class="page-subtitle">Todos os projetos em execução.</div></div>
         <div style="display:flex;gap:8px;">
+          <button class="btn" id="btnImport"><i class="fa-solid fa-file-import"></i> Importar</button>
           <button class="btn" id="btnCsv"><i class="fa-solid fa-file-csv"></i> Exportar</button>
           <button class="btn btn-primary" id="btnNovo"><i class="fa-solid fa-plus"></i> Novo Projeto</button>
         </div>
@@ -453,7 +510,7 @@ const App = {
     const draw = () => {
       let list = Store.projetos().filter(p => {
         if (f.q && !(p.nome||'').toLowerCase().includes(f.q.toLowerCase())) return false;
-        if (f.cliente && p.clienteId !== f.cliente) return false;
+        if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(p.clienteId)) return false;
         if (f.status === '__ativos' && ['concluido','cancelado'].includes(p.status)) return false;
         if (f.status && f.status !== '__ativos' && p.status !== f.status) return false;
         if (f.prioridade && p.prioridade !== f.prioridade) return false;
@@ -489,6 +546,7 @@ const App = {
     $('#fpr').onchange = e => { f.prioridade = e.target.value; draw(); };
     $('#btnNovo').onclick = () => this.openProjetoModal();
     $('#btnCsv').onclick = () => this.exportProjetosCSV();
+    $('#btnImport').onclick = () => this.importCSV('projetos');
     $$('th[data-sort]').forEach(th => th.onclick = () => { this.toggleSort(th.dataset.sort); draw(); });
     draw();
   },
@@ -519,9 +577,33 @@ const App = {
   /* ================== DEMANDAS ================== */
   render_demandas(root) {
     const f = this.filters.demandas;
-    const cliOpts = ['<option value="">Todos clientes</option>'].concat(Store.clientes().map(c=>`<option value="${c.id}" ${c.id===f.cliente?'selected':''}>${escapeHTML(c.empresa)}</option>`)).join('');
-    const projOpts = ['<option value="">Todos projetos</option>'].concat(Store.projetos().map(p=>`<option value="${p.id}" ${p.id===f.projeto?'selected':''}>${escapeHTML(p.nome)}</option>`)).join('');
-    const respOpts = ['<option value="">Todos responsáveis</option>'].concat(Store.equipe().map(e=>`<option value="${e.id}" ${e.id===f.responsavel?'selected':''}>${escapeHTML(e.nome)}</option>`)).join('');
+
+    // Agrupa clientes por empresa (nome exato), removendo duplicatas de empresa no dropdown
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa||'').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = [];
+      empresaMap[key].push(c.id);
+    });
+    const empresasUnicas = Object.keys(empresaMap).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+    const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
+
+    const cliOpts = ['<option value="">Todos clientes</option>'].concat(
+      empresasUnicas.map(emp => `<option value="${escapeHTML(emp)}" ${emp===f.cliente?'selected':''}>${escapeHTML(emp)}</option>`)
+    ).join('');
+
+    const projetosDisponiveis = (clienteIdsSelecionados
+      ? Store.projetos().filter(p => clienteIdsSelecionados.includes(p.clienteId))
+      : Store.projetos()
+    ).slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR'));
+    const projOpts = ['<option value="">Todos projetos</option>'].concat(
+      projetosDisponiveis.map(p=>`<option value="${p.id}" ${p.id===f.projeto?'selected':''}>${escapeHTML(p.nome)}</option>`)
+    ).join('');
+
+    const respOpts = ['<option value="">Todos responsáveis</option>'].concat(
+      Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR')).map(e=>`<option value="${e.id}" ${e.id===f.responsavel?'selected':''}>${escapeHTML(e.nome)}</option>`)
+    ).join('');
     const stOpts = [
       '<option value="">Todos status</option>',
       `<option value="__em_andamento" ${f.status==='__em_andamento'?'selected':''}>Em andamento</option>`,
@@ -564,7 +646,7 @@ const App = {
           const hay = [d.titulo,d.descricao,cli?.empresa,proj?.nome,resp?.nome,d.status,(d.tags||[]).join(',')].map(v=>(v||'').toLowerCase()).join(' ');
           if (!hay.includes(q)) return false;
         }
-        if (f.cliente && d.clienteId !== f.cliente) return false;
+        if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(d.clienteId)) return false;
         if (f.projeto && d.projetoId !== f.projeto) return false;
         if (f.responsavel && d.responsavelId !== f.responsavel) return false;
         if (f.status) {
@@ -606,8 +688,9 @@ const App = {
       tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = () => this.delDemanda(b.dataset.id));
     };
     $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; draw(); }, 150));
-    ['fcli','fproj','fresp','fst','fpr'].forEach(id => $('#'+id).onchange = e => {
-      const map = { fcli:'cliente', fproj:'projeto', fresp:'responsavel', fst:'status', fpr:'prioridade' };
+    $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; this.render(); };
+    ['fproj','fresp','fst','fpr'].forEach(id => $('#'+id).onchange = e => {
+      const map = { fproj:'projeto', fresp:'responsavel', fst:'status', fpr:'prioridade' };
       f[map[id]] = e.target.value; draw();
     });
     $('#fdata').onchange = e => { f.data = e.target.value; draw(); };
@@ -682,7 +765,7 @@ const App = {
     });
   },
 
-  openDemandaDrawer(id) {
+  openDemandaDrawer(id, onVoltar=null) {
     const d = Store.demanda(id); if (!d) return;
     const cli = Store.cliente(d.clienteId), proj = Store.projeto(d.projetoId), resp = Store.pessoa(d.responsavelId);
     const checklist = (d.checklist||[]).map(c => `
@@ -725,7 +808,8 @@ const App = {
         </div>
         <div class="section-title">Histórico</div>
         ${hist || '<div class="empty" style="padding:12px">Sem histórico.</div>'}
-        <div style="display:flex;gap:6px;margin-top:20px;">
+        <div style="display:flex;gap:6px;margin-top:20px;flex-wrap:wrap;">
+          ${onVoltar ? '<button class="btn" id="btnVoltar"><i class="fa-solid fa-arrow-left"></i> Voltar</button>' : ''}
           <button class="btn" id="btnEdit"><i class="fa-solid fa-pen"></i> Editar</button>
           <button class="btn" id="btnDup"><i class="fa-solid fa-copy"></i> Duplicar</button>
           <button class="btn btn-danger" id="btnDel"><i class="fa-solid fa-trash"></i> Excluir</button>
@@ -733,19 +817,20 @@ const App = {
       onOpen: (root, close) => {
         root.querySelectorAll('[data-ck]').forEach(cb => cb.onchange = () => {
           const item = d.checklist.find(x=>x.id===cb.dataset.ck);
-          if (item) { item.done = cb.checked; Store.save(); this.openDemandaDrawer(id); }
+          if (item) { item.done = cb.checked; Store.save(); this.openDemandaDrawer(id, onVoltar); }
         });
         root.querySelector('#ckAdd').onclick = () => {
           const v = root.querySelector('#ckNew').value.trim(); if (!v) return;
           d.checklist.push({ id: uid('ck'), texto:v, done:false });
-          Store.save(); this.openDemandaDrawer(id);
+          Store.save(); this.openDemandaDrawer(id, onVoltar);
         };
         root.querySelector('#cmAdd').onclick = () => {
           const v = root.querySelector('#cmNew').value.trim(); if (!v) return;
           d.comentarios.push({ id: uid('cm'), autor:'Você', texto:v, data:new Date().toISOString() });
           d.historico.push({ tipo:'comentario', data:new Date().toISOString(), texto:'Comentário adicionado' });
-          Store.save(); this.openDemandaDrawer(id);
+          Store.save(); this.openDemandaDrawer(id, onVoltar);
         };
+        if (onVoltar) root.querySelector('#btnVoltar').onclick = () => { close(); onVoltar(); };
         root.querySelector('#btnEdit').onclick = () => { close(); this.openDemandaModal(d); };
         root.querySelector('#btnDup').onclick = () => { close(); this.dupDemanda(id); };
         root.querySelector('#btnDel').onclick = () => { close(); this.delDemanda(id); };
@@ -755,15 +840,68 @@ const App = {
 
   /* ================== KANBAN ================== */
   render_kanban(root) {
+    const f = this.filters.kanban;
     const cols = STATUS_ORDER.filter(s => s !== 'atrasado');
+
+    // Agrupa clientes por empresa (nome exato), removendo duplicatas de empresa no dropdown
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa||'').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = [];
+      empresaMap[key].push(c.id);
+    });
+    const empresasUnicas = Object.keys(empresaMap).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+    const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
+
+    const cliOpts = ['<option value="">Todos clientes</option>'].concat(
+      empresasUnicas.map(emp => `<option value="${escapeHTML(emp)}" ${emp===f.cliente?'selected':''}>${escapeHTML(emp)}</option>`)
+    ).join('');
+
+    // Projetos: só mostra os do cliente selecionado (se houver), e em ordem alfabética
+    const projetosDisponiveis = (clienteIdsSelecionados
+      ? Store.projetos().filter(p => clienteIdsSelecionados.includes(p.clienteId))
+      : Store.projetos()
+    ).slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR'));
+    const projOpts = ['<option value="">Todos projetos</option>'].concat(
+      projetosDisponiveis.map(p=>`<option value="${p.id}" ${p.id===f.projeto?'selected':''}>${escapeHTML(p.nome)}</option>`)
+    ).join('');
+
+    const respOpts = ['<option value="">Todos responsáveis</option>'].concat(
+      Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR')).map(e=>`<option value="${e.id}" ${e.id===f.responsavel?'selected':''}>${escapeHTML(e.nome)}</option>`)
+    ).join('');
+    const prOpts = ['<option value="">Todas prioridades</option>'].concat(Object.keys(PRIORIDADE).map(p=>`<option value="${p}" ${p===f.prioridade?'selected':''}>${PRIORIDADE[p].label}</option>`)).join('');
+
+    const matches = (d) => {
+      if (f.q) {
+        const q = f.q.toLowerCase();
+        const cli = Store.cliente(d.clienteId), proj = Store.projeto(d.projetoId), resp = Store.pessoa(d.responsavelId);
+        const hay = [d.titulo,d.descricao,cli?.empresa,proj?.nome,resp?.nome,(d.tags||[]).join(',')].map(v=>(v||'').toLowerCase()).join(' ');
+        if (!hay.includes(q)) return false;
+      }
+      if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(d.clienteId)) return false;
+      if (f.projeto && d.projetoId !== f.projeto) return false;
+      if (f.responsavel && d.responsavelId !== f.responsavel) return false;
+      if (f.prioridade && d.prioridade !== f.prioridade) return false;
+      return true;
+    };
+
     root.innerHTML = `
       <div class="page-header">
         <div><h1 class="page-title">Kanban</h1><div class="page-subtitle">Arraste os cartões para atualizar o status.</div></div>
         <button class="btn btn-primary" id="btnNovo"><i class="fa-solid fa-plus"></i> Nova Demanda</button>
       </div>
+      <div class="toolbar">
+        <input id="fq" placeholder="Pesquisar demandas..." value="${escapeHTML(f.q)}" style="min-width:220px;flex:1"/>
+        <select id="fcli">${cliOpts}</select>
+        <select id="fproj">${projOpts}</select>
+        <select id="fresp">${respOpts}</select>
+        <select id="fpr">${prOpts}</select>
+        <button class="btn btn-sm" id="fclear"><i class="fa-solid fa-eraser"></i></button>
+      </div>
       <div class="kanban" id="kb">
         ${cols.map(s => {
-          const list = Store.demandas().filter(d => d.status===s);
+          const list = Store.demandas().filter(d => d.status===s && matches(d));
           return `<div class="kanban-col" data-status="${s}">
             <div class="kanban-col-head">
               <h4><span class="dot" style="background:${STATUS[s].color};display:inline-block;margin-right:6px"></span>${STATUS[s].label}</h4>
@@ -776,6 +914,14 @@ const App = {
         }).join('')}
       </div>`;
     $('#btnNovo').onclick = () => this.openDemandaModal();
+    $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; this.render(); }, 150));
+    ['fcli','fproj','fresp','fpr'].forEach(id => $('#'+id).onchange = e => {
+      const map = { fcli:'cliente', fproj:'projeto', fresp:'responsavel', fpr:'prioridade' };
+      f[map[id]] = e.target.value;
+      if (id === 'fcli') f.projeto = ''; // troca de cliente reseta o projeto selecionado
+      this.render();
+    });
+    $('#fclear').onclick = () => { this.filters.kanban = { q:'',cliente:'',projeto:'',responsavel:'',prioridade:'' }; this.render(); };
     this.bindKanbanDrag();
 
     function cardHTML(d) {
@@ -798,10 +944,45 @@ const App = {
   },
   bindKanbanDrag() {
     const kb = $('#kb'); if (!kb) return;
+    this.stopKanbanAutoScroll();
     let dragId = null;
+    const EDGE = 110;
+    const MAX_SPEED = 24;
+    const handleAutoScroll = e => {
+      const rect = kb.getBoundingClientRect();
+      if (e.clientY < rect.top || e.clientY > rect.bottom) {
+        this.stopKanbanAutoScroll();
+        return;
+      }
+      let direction = 0;
+      let distance = 0;
+      if (e.clientX < rect.left + EDGE) {
+        direction = -1;
+        distance = rect.left + EDGE - e.clientX;
+      } else if (e.clientX > rect.right - EDGE) {
+        direction = 1;
+        distance = e.clientX - (rect.right - EDGE);
+      }
+      if (!direction) return this.stopKanbanAutoScroll();
+      const speed = Math.min(MAX_SPEED, 5 + (distance / EDGE) * MAX_SPEED);
+      this.startKanbanAutoScroll(kb, direction * speed);
+    };
+    const finishDrag = () => {
+      kb.classList.remove('is-dragging');
+      this.stopKanbanAutoScroll();
+      document.removeEventListener('dragover', handleAutoScroll);
+      document.removeEventListener('dragend', finishDrag, true);
+    };
     kb.querySelectorAll('.k-card').forEach(card => {
-      card.addEventListener('dragstart', e => { dragId = card.dataset.id; card.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
-      card.addEventListener('dragend', () => card.classList.remove('dragging'));
+      card.addEventListener('dragstart', e => {
+        dragId = card.dataset.id;
+        card.classList.add('dragging');
+        kb.classList.add('is-dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        document.addEventListener('dragover', handleAutoScroll);
+        document.addEventListener('dragend', finishDrag, true);
+      });
+      card.addEventListener('dragend', () => { card.classList.remove('dragging'); finishDrag(); });
       card.querySelector('[data-open]')?.addEventListener('click', e => { e.stopPropagation(); this.openDemandaDrawer(card.dataset.id); });
     });
     kb.querySelectorAll('.kanban-list').forEach(list => {
@@ -820,13 +1001,70 @@ const App = {
         }
       });
     });
+
+    kb.addEventListener('dragover', handleAutoScroll);
+    kb.addEventListener('drop', finishDrag);
+  },
+
+  startKanbanAutoScroll(kb, speed) {
+    this._kbScrollSpeed = speed;
+    if (this._kbScrollTimer) return;
+    const step = () => {
+      const previous = kb.scrollLeft;
+      kb.scrollLeft += this._kbScrollSpeed;
+      if (kb.scrollLeft === previous) return this.stopKanbanAutoScroll();
+      this._kbScrollTimer = requestAnimationFrame(step);
+    };
+    this._kbScrollTimer = requestAnimationFrame(step);
+  },
+
+  stopKanbanAutoScroll() {
+    if (this._kbScrollTimer) { cancelAnimationFrame(this._kbScrollTimer); this._kbScrollTimer = null; }
   },
 
   /* ================== CALENDÁRIO ================== */
   calDate: new Date(),
   render_calendario(root) {
+    const f = this.filters.calendario;
     const ref = new Date(this.calDate.getFullYear(), this.calDate.getMonth(), 1);
     const monthName = ref.toLocaleDateString('pt-BR',{ month:'long', year:'numeric' });
+
+    // Agrupa clientes por empresa (nome exato), removendo duplicatas de empresa no dropdown
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa||'').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = [];
+      empresaMap[key].push(c.id);
+    });
+    const empresasUnicas = Object.keys(empresaMap).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+    const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
+
+    const cliOpts = ['<option value="">Todos clientes</option>'].concat(
+      empresasUnicas.map(emp => `<option value="${escapeHTML(emp)}" ${emp===f.cliente?'selected':''}>${escapeHTML(emp)}</option>`)
+    ).join('');
+
+    const projetosDisponiveis = (clienteIdsSelecionados
+      ? Store.projetos().filter(p => clienteIdsSelecionados.includes(p.clienteId))
+      : Store.projetos()
+    ).slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR'));
+    const projOpts = ['<option value="">Todos projetos</option>'].concat(
+      projetosDisponiveis.map(p=>`<option value="${p.id}" ${p.id===f.projeto?'selected':''}>${escapeHTML(p.nome)}</option>`)
+    ).join('');
+
+    const respOpts = ['<option value="">Todos responsáveis</option>'].concat(
+      Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR')).map(e=>`<option value="${e.id}" ${e.id===f.responsavel?'selected':''}>${escapeHTML(e.nome)}</option>`)
+    ).join('');
+    const prOpts = ['<option value="">Todas prioridades</option>'].concat(Object.keys(PRIORIDADE).map(p=>`<option value="${p}" ${p===f.prioridade?'selected':''}>${PRIORIDADE[p].label}</option>`)).join('');
+
+    const matches = (d) => {
+      if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(d.clienteId)) return false;
+      if (f.projeto && d.projetoId !== f.projeto) return false;
+      if (f.responsavel && d.responsavelId !== f.responsavel) return false;
+      if (f.prioridade && d.prioridade !== f.prioridade) return false;
+      return true;
+    };
+
     root.innerHTML = `
       <div class="page-header">
         <div><h1 class="page-title">Calendário</h1><div class="page-subtitle">Prazos, entregas e reuniões.</div></div>
@@ -837,6 +1075,13 @@ const App = {
           <button class="btn btn-sm" id="hoje">Hoje</button>
         </div>
       </div>
+      <div class="toolbar">
+        <select id="fcli">${cliOpts}</select>
+        <select id="fproj">${projOpts}</select>
+        <select id="fresp">${respOpts}</select>
+        <select id="fpr">${prOpts}</select>
+        <button class="btn btn-sm" id="fclear"><i class="fa-solid fa-eraser"></i></button>
+      </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px;">
         <style>
           .cal-day.has-items { cursor:pointer; transition: border-color .15s, transform .1s; }
@@ -846,20 +1091,39 @@ const App = {
         </style>
         <div class="cal-grid">
           ${['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'].map(d=>`<div class="cal-head">${d}</div>`).join('')}
-          ${this.buildCalendarCells(ref)}
+          ${this.buildCalendarCells(ref, matches)}
         </div>
       </div>`;
     $('#prev').onclick = () => { this.calDate = new Date(ref.getFullYear(), ref.getMonth()-1, 1); this.render(); };
     $('#next').onclick = () => { this.calDate = new Date(ref.getFullYear(), ref.getMonth()+1, 1); this.render(); };
     $('#hoje').onclick = () => { this.calDate = new Date(); this.render(); };
+    $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; this.render(); };
+    ['fproj','fresp','fpr'].forEach(id => $('#'+id).onchange = e => {
+      const map = { fproj:'projeto', fresp:'responsavel', fpr:'prioridade' };
+      f[map[id]] = e.target.value; this.render();
+    });
+    $('#fclear').onclick = () => { this.filters.calendario = { cliente:'',projeto:'',responsavel:'',prioridade:'' }; this.render(); };
     $$('.cal-item').forEach(el => el.onclick = (e) => { e.stopPropagation(); this.openDemandaDrawer(el.dataset.id); });
     $$('.cal-more').forEach(el => el.onclick = (e) => { e.stopPropagation(); this.openDiaDemandasModal(el.dataset.date); });
     $$('.cal-day.has-items').forEach(el => el.onclick = () => this.openDiaDemandasModal(el.dataset.date));
   },
 
   openDiaDemandasModal(iso) {
+    const f = this.filters.calendario;
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa||'').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = [];
+      empresaMap[key].push(c.id);
+    });
+    const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
     const items = Store.demandas()
       .filter(d => d.prazo && isoDay(d.prazo) === iso)
+      .filter(d => !clienteIdsSelecionados || clienteIdsSelecionados.includes(d.clienteId))
+      .filter(d => !f.projeto || d.projetoId === f.projeto)
+      .filter(d => !f.responsavel || d.responsavelId === f.responsavel)
+      .filter(d => !f.prioridade || d.prioridade === f.prioridade)
       .sort((a,b) => (a.titulo||'').localeCompare(b.titulo||''));
     const dataFormatada = fmtDate(iso);
     const body = items.length ? `<div class="dashboard-modal-list">${items.map(d => {
@@ -888,7 +1152,7 @@ const App = {
       }
     });
   },
-  buildCalendarCells(ref) {
+  buildCalendarCells(ref, matches) {
     const first = new Date(ref); first.setDate(1);
     const startDay = first.getDay();
     const daysInMonth = new Date(ref.getFullYear(), ref.getMonth()+1, 0).getDate();
@@ -899,7 +1163,7 @@ const App = {
       const inMonth = d.getMonth() === ref.getMonth();
       const iso = isoDay(d);
       const isToday = iso === isoDay(today());
-      const items = Store.demandas().filter(x => x.prazo && isoDay(x.prazo) === iso);
+      const items = Store.demandas().filter(x => x.prazo && isoDay(x.prazo) === iso && (!matches || matches(x)));
       cells.push(`<div class="cal-day ${inMonth?'':'other'} ${isToday?'today':''} ${items.length?'has-items':''}" data-date="${iso}" title="${items.length? 'Ver todas as demandas do dia' : ''}">
         <div class="cal-daynum">${d.getDate()}</div>
         ${items.slice(0,4).map(x => `<div class="cal-item ${isLate(x)?'late':''}" data-id="${x.id}" title="${escapeHTML(x.titulo)}">${escapeHTML(x.titulo)}</div>`).join('')}
@@ -1011,13 +1275,16 @@ const App = {
       this.charts.tlProgress = new Chart($('#chartTlProgress'), {
         type:'bar',
         data:{
-          labels: rows.map(r => r.empresa),
-          datasets:[{ label:'Progresso (%)', data: rows.map(r=>r.progresso), backgroundColor: rows.map(r=> r.atrasadas ? '#ef4444' : '#6366f1'), borderRadius:6 }]
+          labels: rows.map(r => wrapLabel(r.empresa)),
+          datasets:[{ label:'Progresso (%)', data: rows.map(r=>r.progresso), backgroundColor: rows.map(r=> r.atrasadas ? '#ef4444' : '#6366f1'), borderRadius:6, maxBarThickness:22, categoryPercentage:0.7, barPercentage:0.8 }]
         },
         options:{
           maintainAspectRatio:false, indexAxis:'y',
-          scales:{ x:{ min:0, max:100 } },
-          plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label: ctx => `${ctx.raw}% concluído` } } }
+          scales:{ x:{ min:0, max:100 }, y:{ ticks:{ autoSkip:false, font:{ size:10 } } } },
+          plugins:{ legend:{ display:false }, tooltip:{ callbacks:{
+            title: items => (items[0]?.label instanceof Array ? items[0].label.join(' ') : items[0]?.label),
+            label: ctx => `${ctx.raw}% concluído`
+          } } }
         }
       });
       return;
@@ -1533,7 +1800,10 @@ const App = {
           <button class="btn btn-danger" id="btnDelMembro"><i class="fa-solid fa-trash"></i> Remover membro</button>
         </div>`,
       onOpen: (root, close) => {
-        root.querySelectorAll('[data-id]').forEach(row => row.onclick = () => { close(); this.openDemandaDrawer(row.dataset.id); });
+        root.querySelectorAll('[data-id]').forEach(row => row.onclick = () => {
+          close();
+          this.openDemandaDrawer(row.dataset.id, () => this.openMembroDrawer(id));
+        });
         root.querySelector('#btnEditMembro').onclick = () => { close(); this.openMembroModal(p); };
         root.querySelector('#btnDelMembro').onclick = () => this.delMembro(p, close);
       }
@@ -1802,6 +2072,68 @@ const App = {
               createdAt: existente?.createdAt || new Date().toISOString()
             };
             Store.upsert('clientes', registro);
+            existente ? atualizados++ : n++;
+          } else if (target === 'projetos') {
+            const nome = (row.nome||row.projeto||'').trim();
+            if (!nome) { ignorados++; return; }
+
+            // Resolve cliente pelo nome da empresa (cria se não existir)
+            const clienteNome = (row.cliente||row.empresa||'').trim();
+            let clienteId = '';
+            if (clienteNome) {
+              let cli = Store.clientes().find(c => (c.empresa||'').trim().toLowerCase() === clienteNome.toLowerCase());
+              if (!cli) {
+                cli = { id: uid('c'), nome:'', empresa: clienteNome, contato:'', telefone:'', email:'', cidade:'', obs:'', createdAt: new Date().toISOString() };
+                Store.upsert('clientes', cli);
+              }
+              clienteId = cli.id;
+            }
+
+            // Resolve responsável pelo nome (cria se não existir)
+            const respNome = (row.responsavel||'').trim();
+            let responsavelId = '';
+            if (respNome) {
+              let pessoa = Store.equipe().find(e => (e.nome||'').trim().toLowerCase() === respNome.toLowerCase());
+              if (!pessoa) {
+                pessoa = { id: uid('u'), nome: respNome, cargo:'', email:'' };
+                Store.upsert('equipe', pessoa);
+              }
+              responsavelId = pessoa.id;
+            }
+
+            // Resolve status pelo label (padrão: backlog)
+            const statusLabel = (row.status||'').trim().toLowerCase();
+            const statusCode = STATUS_ORDER.find(s => s!=='atrasado' && STATUS[s].label.toLowerCase() === statusLabel) || 'backlog';
+
+            // Resolve prioridade pelo label (padrão: normal)
+            const prioLabel = (row.prioridade||'').trim().toLowerCase();
+            const prioCode = Object.keys(PRIORIDADE).find(p => PRIORIDADE[p].label.toLowerCase() === prioLabel) || 'normal';
+
+            // Converte datas dd/mm/aaaa para ISO
+            const parseBRDate = (s) => {
+              s = (s||'').trim(); if (!s || s === '—') return '';
+              const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+              if (!m) return '';
+              return `${m[3]}-${m[2]}-${m[1]}`;
+            };
+            const inicio = parseBRDate(row.inicio);
+            const prazo = parseBRDate(row.prazo);
+
+            // Evita duplicar: casa por nome + cliente já cadastrados
+            const existente = Store.projetos().find(p =>
+              (p.nome||'').trim().toLowerCase() === nome.toLowerCase() &&
+              p.clienteId === clienteId
+            );
+
+            const registro = {
+              id: existente?.id || uid('p'),
+              nome, clienteId, responsavelId,
+              inicio, prazo, status: statusCode, prioridade: prioCode,
+              descricao: (row.descricao||'').trim() || existente?.descricao || '',
+              obs: (row.obs||'').trim() || existente?.obs || '',
+              equipeIds: existente?.equipeIds || []
+            };
+            Store.upsert('projetos', registro);
             existente ? atualizados++ : n++;
           } else if (target === 'equipe') {
             const nome = (row.nome||'').trim();
