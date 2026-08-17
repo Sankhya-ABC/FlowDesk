@@ -51,6 +51,13 @@ const PRIORIDADE = {
   urgente:  { label:'Urgente',  color:'#ef4444' },
 };
 
+const EQUIPE_AREA = {
+  gp:              { label:'GP',              color:'#6366f1' },
+  cs:              { label:'CS',              color:'#0ea5e9' },
+  desenvolvimento: { label:'Dev', color:'#a855f7' },
+  consultores:     { label:'Consultores',     color:'#f59e0b' },
+};
+
 const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[m]));
