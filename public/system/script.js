@@ -3,15 +3,31 @@
 const App = {
   view: 'dashboard',
   filters: {
-    demandas: { q:'', cliente:'', projeto:'', responsavel:'', status:'', prioridade:'', data:'' },
-    projetos: { q:'', cliente:'', status:'', prioridade:'' },
+    demandas: { q:'', cliente:'', projeto:'', responsavel:'', equipe:'', status:'', prioridade:'', data:'' },
+    projetos: { q:'', cliente:'', status:'', prioridade:'', responsavel:'' },
     clientes: { q:'' },
     timeline: { cliente:'' },
-    kanban: { q:'', cliente:'', projeto:'', responsavel:'', prioridade:'' },
-    calendario: { cliente:'', projeto:'', responsavel:'', prioridade:'' }
+    kanban: { q:'', cliente:'', projeto:'', responsavel:'', equipe:'', prioridade:'' },
+    calendario: { cliente:'', projeto:'', responsavel:'', prioridade:'' },
+    cliente360: { cliente:'' }
   },
+  cliente360Tab: 'visao',
+  cliente360CalDate: new Date(),
   sort: { col:null, dir:1 },
   charts: {},
+
+  // Cores de texto/grade dos gráficos conforme o tema ativo. Usado em todo lugar que
+  // cria um Chart.js (Dashboard e Timeline), pra não depender só de Chart.defaults
+  // (que é global e só era setado dentro de drawCharts, deixando outros gráficos
+  // sem cor certa — ex.: labels ilegíveis no tema claro).
+  chartTheme() {
+    const dark = document.body.classList.contains('dark');
+    const textColor = dark ? '#cbd5e1' : '#334155';
+    const gridColor = dark ? '#1f2a4c' : '#c3cadb';
+    Chart.defaults.color = textColor;
+    Chart.defaults.borderColor = gridColor;
+    return { dark, textColor, gridColor };
+  },
 
   async init() {
     await Store.load();
@@ -23,14 +39,25 @@ const App = {
     this.updateNotifBadge();
   },
 
+  currentUser: null,         // objeto cru retornado por /api/auth/me
+  currentUserPessoaId: null, // id correspondente em Store.equipe(), se houver match
+
   async loadCurrentUser() {
     try {
       const res = await fetch('/api/auth/me');
       if (!res.ok) return window.location.replace('/login.html');
       const user = await res.json();
+      this.currentUser = user;
       $('#currentUserAvatar').textContent = initials(user.nome || '');
       $('#currentUserName').textContent = user.nome || '—';
       $('#currentUserRole').textContent = user.cargo || '—';
+
+      // Tenta casar o usuário logado com um registro da equipe (por email, depois por nome)
+      // para poder pré-selecionar "Criado por" ao abrir uma nova demanda.
+      const equipe = Store.equipe();
+      const match = equipe.find(p => p.email && user.email && p.email.toLowerCase() === user.email.toLowerCase())
+        || equipe.find(p => p.nome && user.nome && p.nome.toLowerCase() === user.nome.toLowerCase());
+      this.currentUserPessoaId = match ? match.id : null;
     } catch {
       // Sem rede: deixa seguir em modo offline (Store já cuida disso) sem forçar logout.
     }
@@ -93,6 +120,13 @@ const App = {
     this.render();
   },
 
+  // Abre a Área do Cliente já com a empresa selecionada (usado a partir da lista de Clientes)
+  goCliente360(empresa, tab='visao') {
+    this.filters.cliente360.cliente = empresa || '';
+    this.cliente360Tab = tab;
+    this.go('cliente360');
+  },
+
   render() {
     const root = $('#view-root');
     root.innerHTML = '';
@@ -129,7 +163,7 @@ const App = {
         <button class="btn btn-sm" id="markAll">Marcar lidas</button>
       </div>
       ${list.length? list.map(n=>`
-        <div class="notif-item">
+        <div class="notif-item" data-id="${n.id}" style="cursor:pointer">
           <span class="dot" style="background:${n.lida?'var(--muted)':'var(--danger)'}"></span>
           <div>
             <div class="notif-title">${escapeHTML(n.titulo)}</div>
@@ -137,6 +171,16 @@ const App = {
           </div>
         </div>`).join('') : UI.emptyState('bell-slash','Sem notificações.')}`;
     panel.classList.remove('hidden');
+    panel.querySelectorAll('.notif-item[data-id]').forEach(el => {
+      el.onclick = (e) => {
+        e.stopPropagation();
+        const n = Store.state.notificacoes.find(x=>x.id===el.dataset.id);
+        if (!n || n.lida) return;
+        n.lida = true;
+        Store.save(); this.updateNotifBadge();
+        el.querySelector('.dot').style.background = 'var(--muted)';
+      };
+    });
     $('#markAll') && ($('#markAll').onclick = () => {
       Store.state.notificacoes.forEach(n=>n.lida=true);
       Store.save(); this.updateNotifBadge(); this.toggleNotifs();
@@ -191,7 +235,7 @@ const App = {
       const cliente = Store.cliente(record.clienteId);
       const projeto = Store.projeto(record.projetoId);
       const responsavel = Store.pessoa(record.responsavelId);
-      return `<div class="dashboard-modal-item"><div><strong>${escapeHTML(record.titulo)}</strong><span>${escapeHTML(cliente?.empresa || 'Sem cliente')} · ${escapeHTML(projeto?.nome || 'Sem projeto')} · ${escapeHTML(responsavel?.nome || 'Sem responsavel')} · Prazo: ${fmtDate(record.prazo)}</span></div>${UI.statusPill(isLate(record) ? 'atrasado' : record.status)}</div>`;
+      return `<div class="dashboard-modal-item"><div><strong>${escapeHTML(record.titulo)}</strong><span>${escapeHTML(cliente?.empresa || 'Sem cliente')} · ${escapeHTML(projeto?.nome || 'Sem projeto')} · ${escapeHTML(responsavel?.nome || 'Sem executante')} · Prazo: ${fmtDate(record.prazo)}</span></div>${UI.statusPill(isLate(record) ? 'atrasado' : record.status)}</div>`;
     }).join('')}</div>` : UI.emptyState('inbox','Nenhum item encontrado para este indicador.');
     UI.modal({ title: `${config.title} (${records.length})`, size:'lg', body, footer:'<button class="btn" data-close-modal>Fechar</button>', onOpen: (root, close) => {
       root.querySelector('[data-close-modal]').onclick = close;
@@ -225,7 +269,6 @@ const App = {
         <div style="display:flex;gap:8px;">
           <button class="btn" id="btnExportPdf"><i class="fa-solid fa-file-pdf"></i> PDF</button>
           <button class="btn" id="btnExportCsv"><i class="fa-solid fa-file-csv"></i> CSV</button>
-          <button class="btn" id="btnReseed" title="Regenerar dados de exemplo"><i class="fa-solid fa-rotate"></i> Reset</button>
         </div>
       </div>
 
@@ -242,7 +285,7 @@ const App = {
 
       <div class="charts-grid">
         <div class="chart-card col-4"><h3>Por Status</h3><div class="chart-wrap"><canvas id="chartStatus"></canvas></div></div>
-        <div class="chart-card col-4"><h3>Por Responsável</h3><div class="chart-wrap"><canvas id="chartResp"></canvas></div></div>
+        <div class="chart-card col-4"><h3>Por Executante</h3><div class="chart-wrap"><canvas id="chartResp"></canvas></div></div>
         <div class="chart-card col-4"><h3>Por Cliente</h3><div class="chart-wrap"><canvas id="chartCli"></canvas></div></div>
         <div class="chart-card col-8"><h3>Evolução semanal</h3><div class="chart-wrap"><canvas id="chartLine"></canvas></div></div>
         <div class="chart-card col-4"><h3>Timeline de entregas (próx. 14 dias)</h3><div class="chart-wrap" style="height:260px;overflow:auto;" id="miniTimeline"></div></div>
@@ -251,9 +294,6 @@ const App = {
 
     $('#btnExportPdf').onclick = () => this.exportDashboardPDF();
     $('#btnExportCsv').onclick = () => this.exportDemandsCSV();
-    $('#btnReseed').onclick = () => UI.confirm('Resetar dados','Regenerar todos os dados de exemplo?', () => {
-      Store.reset(); UI.toast('Dados regenerados','success'); this.render();
-    });
     $$('[data-dashboard-icon]').forEach(card => {
       const open = () => this.openDashboardKpi(card.dataset.dashboardIcon);
       card.onclick = open;
@@ -280,10 +320,7 @@ const App = {
   drawCharts() {
     Object.values(this.charts).forEach(c => c && c.destroy && c.destroy());
     this.charts = {};
-    const dark = document.body.classList.contains('dark');
-    const textColor = dark ? '#cbd5e1' : '#334155';
-    Chart.defaults.color = textColor;
-    Chart.defaults.borderColor = dark ? '#1f2a4c' : '#e6e9f2';
+    const { textColor } = this.chartTheme();
 
     const dems = Store.demandas();
 
@@ -307,7 +344,7 @@ const App = {
     const respCount = {};
     dems.forEach(d => {
       const p = Store.pessoa(d.responsavelId);
-      const n = p?.nome || 'Sem responsável';
+      const n = p?.nome || 'Sem executante';
       respCount[n] = (respCount[n]||0)+1;
     });
     const respEntries = Object.entries(respCount).sort((a,b)=>b[1]-a[1]).slice(0,8);
@@ -408,25 +445,32 @@ const App = {
         const q = f.q.toLowerCase();
         return [c.nome,c.empresa,c.email,c.cidade,c.telefone].some(v => (v||'').toLowerCase().includes(q));
       });
-      this.applySort(list);
+      if (this.sort.col) {
+        this.applySort(list);
+      } else {
+        // Ordem padrão: empresa em ordem alfabética
+        list.sort((a,b) => (a.empresa||'').localeCompare(b.empresa||'', 'pt-BR'));
+      }
       const tb = $('#tbody');
       if (!list.length) { tb.innerHTML = `<tr><td colspan="7">${UI.emptyState('users','Nenhum cliente encontrado.')}</td></tr>`; return; }
       tb.innerHTML = list.map(c => {
         const projs = Store.projetos().filter(p=>p.clienteId===c.id).length;
         const dems = Store.demandas().filter(d=>d.clienteId===c.id).length;
         return `<tr>
-          <td><strong>${escapeHTML(c.empresa)}</strong></td>
+          <td><strong class="link-like" data-a="open360" data-empresa="${escapeHTML(c.empresa)}" style="cursor:pointer">${escapeHTML(c.empresa)}</strong></td>
           <td>${escapeHTML(c.nome)}<div style="color:var(--text-2);font-size:11px">${escapeHTML(c.telefone||'')}</div></td>
           <td>${escapeHTML(c.email||'')}</td>
           <td>${escapeHTML(c.cidade||'')}</td>
           <td><span class="pill">${projs}</span></td>
           <td><span class="pill">${dems}</span></td>
           <td><div class="row-actions">
+            <button data-a="open360" data-empresa="${escapeHTML(c.empresa)}" title="Abrir área do cliente"><i class="fa-solid fa-building"></i></button>
             <button data-a="edit" data-id="${c.id}" title="Editar"><i class="fa-solid fa-pen"></i></button>
             <button class="del" data-a="del" data-id="${c.id}" title="Excluir"><i class="fa-solid fa-trash"></i></button>
           </div></td>
         </tr>`;
       }).join('');
+      tb.querySelectorAll('[data-a="open360"]').forEach(b => b.onclick = () => this.goCliente360(b.dataset.empresa));
       tb.querySelectorAll('[data-a="edit"]').forEach(b => b.onclick = () => this.openClienteModal(Store.cliente(b.dataset.id)));
       tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = () => this.delCliente(b.dataset.id));
     };
@@ -460,6 +504,200 @@ const App = {
     });
   },
 
+  /* ================== ÁREA DO CLIENTE (workspace estilo monday) ================== */
+  render_cliente360(root) {
+    const f = this.filters.cliente360;
+
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa||'').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = [];
+      empresaMap[key].push(c.id);
+    });
+    const empresasUnicas = Object.keys(empresaMap).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+    if (!f.cliente && empresasUnicas.length === 1) f.cliente = empresasUnicas[0];
+
+    const cliOpts = ['<option value="">Selecione um cliente...</option>'].concat(
+      empresasUnicas.map(emp => `<option value="${escapeHTML(emp)}" ${emp===f.cliente?'selected':''}>${escapeHTML(emp)}</option>`)
+    ).join('');
+
+    root.innerHTML = `
+      <div class="page-header">
+        <div><h1 class="page-title">Área do Cliente</h1><div class="page-subtitle">Tudo o que é daquele cliente, em um só lugar.</div></div>
+        <div class="toolbar" style="margin-bottom:0;">
+          <i class="fa-solid fa-building" style="color:var(--text-2)"></i>
+          <select id="clienteSelect" style="min-width:220px;font-weight:600;">${cliOpts}</select>
+        </div>
+      </div>
+      <div id="c360Body"></div>`;
+
+    // Re-renderiza só a Área do Cliente (sem sair pra outra rota), usado pelas
+    // sub-telas embutidas (Demandas/Kanban/Calendário) no lugar de this.render().
+    const rerenderC360 = () => this.render_cliente360(root);
+
+    $('#clienteSelect').onchange = e => { f.cliente = e.target.value; rerenderC360(); };
+
+    const body = $('#c360Body');
+    if (!f.cliente) {
+      body.innerHTML = UI.emptyState('building', 'Selecione um cliente acima para ver projetos, demandas, kanban e calendário dele.');
+      return;
+    }
+
+    const clienteIds = empresaMap[f.cliente] || [];
+    const projetos = Store.projetos().filter(p => clienteIds.includes(p.clienteId));
+    const projetoIds = projetos.map(p=>p.id);
+    const demandas = Store.demandas().filter(d => clienteIds.includes(d.clienteId) || projetoIds.includes(d.projetoId));
+    const abertas = demandas.filter(d => !['concluido','cancelado'].includes(d.status));
+    const atrasadas = demandas.filter(d => isLate(d));
+    const concluidas = demandas.filter(d => d.status === 'concluido');
+
+    const tabs = [
+      { id:'visao', label:'Visão geral', icon:'chart-pie' },
+      { id:'projetos', label:'Projetos', icon:'diagram-project', count: projetos.length },
+      { id:'demandas', label:'Demandas', icon:'list-check', count: demandas.length },
+      { id:'kanban', label:'Kanban', icon:'columns' },
+      { id:'calendario', label:'Calendário', icon:'calendar-days' },
+    ];
+    if (!tabs.find(t=>t.id===this.cliente360Tab)) this.cliente360Tab = 'visao';
+
+    body.innerHTML = `
+      <div class="c360-tabs">
+        ${tabs.map(t => `<button class="c360-tab ${this.cliente360Tab===t.id?'active':''}" data-tab="${t.id}">
+          <i class="fa-solid fa-${t.icon}"></i> ${t.label} ${t.count!=null?`<span class="c360-tab-count">${t.count}</span>`:''}
+        </button>`).join('')}
+      </div>
+      <div id="c360Pane"></div>`;
+
+    body.querySelectorAll('.c360-tab').forEach(btn => btn.onclick = () => {
+      this.cliente360Tab = btn.dataset.tab;
+      rerenderC360();
+    });
+
+    const pane = $('#c360Pane');
+    const contato = Store.cliente(clienteIds[0]);
+
+    if (this.cliente360Tab === 'visao') {
+      pane.innerHTML = `
+        <div class="cards-grid">
+          <div class="kpi-card"><div class="kpi-label">Projetos</div><div class="kpi-value">${projetos.length}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Demandas abertas</div><div class="kpi-value">${abertas.length}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Atrasadas</div><div class="kpi-value" style="color:var(--danger)">${atrasadas.length}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Concluídas</div><div class="kpi-value" style="color:var(--success)">${concluidas.length}</div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+          <div class="table-wrap" style="padding:16px;">
+            <h3 style="margin:0 0 10px;font-size:14px;">Contatos</h3>
+            ${clienteIds.map(id => Store.cliente(id)).filter(Boolean).map(c => `
+              <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+                <strong>${escapeHTML(c.nome||'—')}</strong>
+                <div style="font-size:12px;color:var(--text-2)">${escapeHTML(c.contato||'')} ${c.email?'· '+escapeHTML(c.email):''} ${c.telefone?'· '+escapeHTML(c.telefone):''}</div>
+              </div>`).join('') || UI.emptyState('user','Sem contatos cadastrados.')}
+          </div>
+          <div class="table-wrap" style="padding:16px;">
+            <h3 style="margin:0 0 10px;font-size:14px;">Próximos prazos</h3>
+            ${demandas.filter(d=>d.prazo && !['concluido','cancelado'].includes(d.status)).sort((a,b)=>new Date(a.prazo)-new Date(b.prazo)).slice(0,6).map(d => `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer;" data-open-dem="${d.id}">
+                <span>${escapeHTML(d.titulo)}</span>
+                ${UI.statusPill(isLate(d)?'atrasado':d.status)}
+              </div>`).join('') || UI.emptyState('calendar-check','Nenhum prazo pendente.')}
+          </div>
+        </div>`;
+      pane.querySelectorAll('[data-open-dem]').forEach(el => el.onclick = () => this.openDemandaDrawer(el.dataset.openDem));
+      return;
+    }
+
+    if (this.cliente360Tab === 'projetos') {
+      pane.innerHTML = `
+        <div class="page-header" style="margin-bottom:10px;">
+          <div></div>
+          <button class="btn btn-primary btn-sm" id="c360NovoProj"><i class="fa-solid fa-plus"></i> Novo Projeto</button>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Projeto</th><th>Executante</th><th>Início</th><th>Prazo</th><th>Status</th><th>Prioridade</th><th>Demandas</th><th style="width:100px"></th></tr></thead>
+          <tbody>${projetos.length ? projetos.map(p => {
+            const r = Store.pessoa(p.responsavelId);
+            const demsCount = Store.demandas().filter(d=>d.projetoId===p.id).length;
+            return `<tr>
+              <td><strong>${escapeHTML(p.nome)}</strong></td>
+              <td>${escapeHTML(r?.nome||'—')}</td>
+              <td>${fmtDate(p.inicio)}</td>
+              <td>${fmtDate(p.prazo)}</td>
+              <td>${UI.statusPill(p.status)}</td>
+              <td>${UI.prioPill(p.prioridade)}</td>
+              <td><span class="pill">${demsCount}</span></td>
+              <td><div class="row-actions"><button data-a="edit" data-id="${p.id}"><i class="fa-solid fa-pen"></i></button></div></td>
+            </tr>`;
+          }).join('') : `<tr><td colspan="8">${UI.emptyState('diagram-project','Nenhum projeto para este cliente ainda.')}</td></tr>`}</tbody>
+        </table></div>`;
+      pane.querySelectorAll('[data-a="edit"]').forEach(b => b.onclick = () => this.openProjetoModal(Store.projeto(b.dataset.id)));
+      $('#c360NovoProj').onclick = () => {
+        UI.modal({
+          title: 'Novo Projeto', size:'lg',
+          body: UI.projetoForm({ clienteId: clienteIds[0] }),
+          footer: `<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="save"><i class="fa-solid fa-check"></i> Salvar</button>`,
+          onOpen: (mroot, close) => {
+            mroot.querySelector('[data-close-modal]').onclick = close;
+            mroot.querySelector('#save').onclick = () => {
+              const d = UI.readForm(mroot.querySelector('#projetoForm'));
+              if (!d.nome || !d.clienteId) return UI.toast('Nome e cliente são obrigatórios','warn');
+              Store.upsert('projetos', { ...d, equipeIds: [] });
+              close(); UI.toast('Projeto salvo','success'); this.render();
+            };
+          }
+        });
+      };
+      return;
+    }
+
+    if (this.cliente360Tab === 'demandas') {
+      // Reaproveita a tela de Demandas, mas com um filtro isolado (não mexe no
+      // this.filters.demandas global), pra não "vazar" o cliente selecionado aqui
+      // pra quando o usuário for na tela de Demandas normal pelo menu.
+      const backup = this.filters.demandas;
+      this.filters.demandas = { ...backup, cliente: f.cliente };
+      pane.innerHTML = `<div id="c360DemPane"></div>`;
+      this.render_demandas($('#c360DemPane'), rerenderC360);
+      this.filters.demandas = backup;
+      return;
+    }
+
+    if (this.cliente360Tab === 'kanban') {
+      if (!this.cliente360Filters) this.cliente360Filters = {};
+      if (!this.cliente360Filters.kanban) this.cliente360Filters.kanban = { q:'', cliente:f.cliente, projeto:'', responsavel:'', equipe:'', prioridade:'' };
+      const backup = this.filters.kanban;
+      this.filters.kanban = this.cliente360Filters.kanban;
+      pane.innerHTML = `<div id="c360KbPane"></div>`;
+      this.render_kanban($('#c360KbPane'), rerenderC360);
+      this.filters.kanban = backup;
+      return;
+    }
+
+    if (this.cliente360Tab === 'calendario') {
+      if (!this.cliente360Filters) this.cliente360Filters = {};
+      if (!this.cliente360Filters.calendario) this.cliente360Filters.calendario = { cliente:f.cliente, projeto:'', responsavel:'', prioridade:'' };
+      if (!this.cliente360CalDate) this.cliente360CalDate = new Date();
+      const backupFilter = this.filters.calendario;
+      const backupDate = this.calDate;
+      this.filters.calendario = this.cliente360Filters.calendario;
+      this.calDate = this.cliente360CalDate;
+      pane.innerHTML = `<div id="c360CalPane"></div>`;
+      // onChange (rerenderC360) só é chamado de forma assíncrona, depois de um clique
+      // (prev/next/hoje/filtro). É nesse momento que precisamos gravar o this.calDate
+      // atualizado de volta em cliente360CalDate — gravar isso logo em seguida, de
+      // forma síncrona, salvava sempre a data antiga (a mudança do clique ainda nem
+      // tinha acontecido), fazendo "Agosto" voltar sozinho a cada novo render.
+      const onCalChange = () => {
+        this.cliente360CalDate = this.calDate;
+        rerenderC360();
+      };
+      this.render_calendario($('#c360CalPane'), onCalChange);
+      this.filters.calendario = backupFilter;
+      this.calDate = backupDate;
+      return;
+    }
+  },
+
   /* ================== PROJETOS ================== */
   render_projetos(root) {
     const f = this.filters.projetos;
@@ -473,7 +711,6 @@ const App = {
       empresaMap[key].push(c.id);
     });
     const empresasUnicas = Object.keys(empresaMap).sort((a,b)=>a.localeCompare(b,'pt-BR'));
-    const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
 
     const cliOpts = ['<option value="">Todos os clientes</option>'].concat(
       empresasUnicas.map(emp => `<option value="${escapeHTML(emp)}" ${emp===f.cliente?'selected':''}>${escapeHTML(emp)}</option>`)
@@ -483,6 +720,10 @@ const App = {
       `<option value="__ativos" ${f.status==='__ativos'?'selected':''}>Projetos ativos</option>`
     ].concat(STATUS_ORDER.filter(s=>s!=='atrasado').map(s=>`<option value="${s}" ${s===f.status?'selected':''}>${STATUS[s].label}</option>`)).join('');
     const prOpts = ['<option value="">Todas prioridades</option>'].concat(Object.keys(PRIORIDADE).map(p=>`<option value="${p}" ${p===f.prioridade?'selected':''}>${PRIORIDADE[p].label}</option>`)).join('');
+    const respOptsList = Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR'));
+    const respOpts = ['<option value="">Todos executantes</option>'].concat(
+      respOptsList.map(r=>`<option value="${r.id}" ${r.id===f.responsavel?'selected':''}>${escapeHTML(r.nome)}</option>`)
+    ).join('');
 
     root.innerHTML = `
       <div class="page-header">
@@ -496,21 +737,24 @@ const App = {
       <div class="toolbar">
         <input id="fq" placeholder="Pesquisar projetos..." value="${escapeHTML(f.q)}" style="min-width:240px;flex:1"/>
         <select id="fcli">${cliOpts}</select>
+        <select id="fresp">${respOpts}</select>
         <select id="fst">${stOpts}</select>
         <select id="fpr">${prOpts}</select>
       </div>
       <div class="table-wrap"><table>
         <thead><tr>
-          <th data-sort="nome">Projeto</th><th>Cliente</th><th>Responsável</th>
+          <th data-sort="nome">Projeto</th><th>Cliente</th><th>Executante</th>
           <th data-sort="inicio">Início</th><th data-sort="prazo">Prazo</th>
           <th>Status</th><th>Prioridade</th><th>Demandas</th><th style="width:140px"></th>
         </tr></thead><tbody id="tbody"></tbody>
       </table></div>`;
 
     const draw = () => {
+      const clienteIdsSelecionados = f.cliente ? (empresaMap[f.cliente]||[]) : null;
       let list = Store.projetos().filter(p => {
         if (f.q && !(p.nome||'').toLowerCase().includes(f.q.toLowerCase())) return false;
         if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(p.clienteId)) return false;
+        if (f.responsavel && p.responsavelId !== f.responsavel) return false;
         if (f.status === '__ativos' && ['concluido','cancelado'].includes(p.status)) return false;
         if (f.status && f.status !== '__ativos' && p.status !== f.status) return false;
         if (f.prioridade && p.prioridade !== f.prioridade) return false;
@@ -542,6 +786,7 @@ const App = {
     };
     $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; draw(); }, 150));
     $('#fcli').onchange = e => { f.cliente = e.target.value; draw(); };
+    $('#fresp').onchange = e => { f.responsavel = e.target.value; draw(); };
     $('#fst').onchange = e => { f.status = e.target.value; draw(); };
     $('#fpr').onchange = e => { f.prioridade = e.target.value; draw(); };
     $('#btnNovo').onclick = () => this.openProjetoModal();
@@ -575,7 +820,8 @@ const App = {
   },
 
   /* ================== DEMANDAS ================== */
-  render_demandas(root) {
+  render_demandas(root, onChange) {
+    const doRender = onChange || (() => this.render());
     const f = this.filters.demandas;
 
     // Agrupa clientes por empresa (nome exato), removendo duplicatas de empresa no dropdown
@@ -611,6 +857,7 @@ const App = {
       `<option value="__pendencias" ${f.status==='__pendencias'?'selected':''}>Pendencias</option>`
     ].concat(STATUS_ORDER.filter(s=>s!=='atrasado').map(s=>`<option value="${s}" ${s===f.status?'selected':''}>${STATUS[s].label}</option>`)).join('');
     const prOpts = ['<option value="">Todas prioridades</option>'].concat(Object.keys(PRIORIDADE).map(p=>`<option value="${p}" ${p===f.prioridade?'selected':''}>${PRIORIDADE[p].label}</option>`)).join('');
+    const eqOpts = ['<option value="">Todas equipes</option>'].concat(Object.keys(EQUIPE_AREA).map(k=>`<option value="${k}" ${k===f.equipe?'selected':''}>${EQUIPE_AREA[k].label}</option>`)).join('');
 
     root.innerHTML = `
       <div class="page-header">
@@ -626,6 +873,7 @@ const App = {
         <select id="fcli">${cliOpts}</select>
         <select id="fproj">${projOpts}</select>
         <select id="fresp">${respOpts}</select>
+        <select id="feq">${eqOpts}</select>
         <select id="fst">${stOpts}</select>
         <select id="fpr">${prOpts}</select>
         <input type="date" id="fdata" value="${f.data||''}"/>
@@ -633,7 +881,7 @@ const App = {
       </div>
       <div class="table-wrap"><table>
         <thead><tr>
-          <th data-sort="titulo">Título</th><th>Projeto</th><th>Cliente</th><th>Responsável</th>
+          <th data-sort="titulo">Título</th><th>Projeto</th><th>Cliente</th><th>Executante</th><th>Equipe</th>
           <th>Status</th><th>Prioridade</th><th data-sort="prazo">Prazo</th><th style="width:170px"></th>
         </tr></thead><tbody id="tbody"></tbody>
       </table></div>`;
@@ -655,13 +903,14 @@ const App = {
           else if (f.status==='__pendencias' && !['backlog','analise','cliente'].includes(d.status)) return false;
           else if (!['__em_andamento','__pendencias'].includes(f.status) && d.status !== f.status) return false;
         }
+        if (f.equipe && d.equipeArea !== f.equipe) return false;
         if (f.prioridade && d.prioridade !== f.prioridade) return false;
         if (f.data && (!d.prazo || isoDay(d.prazo) !== f.data)) return false;
         return true;
       });
       this.applySort(list);
       const tb = $('#tbody');
-      if (!list.length) { tb.innerHTML = `<tr><td colspan="8">${UI.emptyState('list-check','Nenhuma demanda encontrada.')}</td></tr>`; return; }
+      if (!list.length) { tb.innerHTML = `<tr><td colspan="9">${UI.emptyState('list-check','Nenhuma demanda encontrada.')}</td></tr>`; return; }
       tb.innerHTML = list.map(d => {
         const cli = Store.cliente(d.clienteId); const proj = Store.projeto(d.projetoId); const resp = Store.pessoa(d.responsavelId);
         const late = isLate(d);
@@ -671,6 +920,7 @@ const App = {
           <td>${escapeHTML(proj?.nome||'—')}</td>
           <td>${escapeHTML(cli?.empresa||'—')}</td>
           <td>${escapeHTML(resp?.nome||'—')}</td>
+          <td>${UI.equipeAreaPill(d.equipeArea)}</td>
           <td>${UI.statusPill(late?'atrasado':d.status)}</td>
           <td>${UI.prioPill(d.prioridade)}</td>
           <td>${fmtDate(d.prazo)}</td>
@@ -688,13 +938,21 @@ const App = {
       tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = () => this.delDemanda(b.dataset.id));
     };
     $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; draw(); }, 150));
-    $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; this.render(); };
-    ['fproj','fresp','fst','fpr'].forEach(id => $('#'+id).onchange = e => {
-      const map = { fproj:'projeto', fresp:'responsavel', fst:'status', fpr:'prioridade' };
+    $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; doRender(); };
+    $('#fproj').onchange = e => {
+      f.projeto = e.target.value;
+      // Ao escolher um projeto, já vincula o filtro de Cliente à empresa daquele projeto.
+      const proj = f.projeto ? Store.projeto(f.projeto) : null;
+      const cli = proj?.clienteId ? Store.cliente(proj.clienteId) : null;
+      f.cliente = cli ? (cli.empresa||'').trim() : f.cliente;
+      doRender();
+    };
+    ['fresp','feq','fst','fpr'].forEach(id => $('#'+id).onchange = e => {
+      const map = { fresp:'responsavel', feq:'equipe', fst:'status', fpr:'prioridade' };
       f[map[id]] = e.target.value; draw();
     });
     $('#fdata').onchange = e => { f.data = e.target.value; draw(); };
-    $('#fclear').onclick = () => { this.filters.demandas = { q:'',cliente:'',projeto:'',responsavel:'',status:'',prioridade:'',data:'' }; this.render(); };
+    $('#fclear').onclick = () => { this.filters.demandas = { q:'',cliente:'',projeto:'',responsavel:'',equipe:'',status:'',prioridade:'',data:'' }; doRender(); };
     $('#btnNovo').onclick = () => this.openDemandaModal();
     $('#btnImport').onclick = () => this.importCSV('demandas');
     $('#btnCsv').onclick = () => this.exportDemandsCSV();
@@ -705,21 +963,53 @@ const App = {
   openDemandaModal(d=null) {
     UI.modal({
       title: d ? 'Editar Demanda' : 'Nova Demanda', size:'lg',
-      body: UI.demandaForm(d||{}),
+      body: UI.demandaForm(d||{}, { defaultCriadoPorId: this.currentUserPessoaId || '' }),
       footer: `<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="save"><i class="fa-solid fa-check"></i> Salvar</button>`,
       onOpen: (root, close) => {
         root.querySelector('[data-close-modal]').onclick = close;
 
-        // Ao trocar a empresa, repopula o select de contato (clienteId) com os clientes daquela empresa
+        // Filtro cruzado Projeto <-> Cliente (Empresa):
+        // - escolher um Projeto filtra/seleciona a Empresa dele automaticamente;
+        // - escolher uma Empresa filtra a lista de Projetos para só os daquela empresa
+        //   (e repopula o select de contato/Solicitante).
         const form = root.querySelector('#demandaForm');
         const empresaMap = JSON.parse(form.dataset.empresaMap || '{}');
+        const projetoEmpresaMap = JSON.parse(form.dataset.projetoEmpresaMap || '{}');
+        const projetoClienteMap = JSON.parse(form.dataset.projetoClienteMap || '{}');
+        const empresaProjetosMap = JSON.parse(form.dataset.empresaProjetosMap || '{}');
+        const todosProjetos = JSON.parse(form.dataset.todosProjetos || '[]');
         const empresaSelect = form.querySelector('[name="empresaSelecionada"]');
         const clienteSelect = form.querySelector('[name="clienteId"]');
-        empresaSelect.onchange = () => {
-          const contatos = empresaMap[empresaSelect.value] || [];
+        const projetoSelect = form.querySelector('[name="projetoId"]');
+
+        const preencherContatos = (empresa, selecionado='') => {
+          const contatos = empresaMap[empresa] || [];
           clienteSelect.innerHTML = ['<option value="">—</option>']
-            .concat(contatos.map(c => `<option value="${c.id}">${escapeHTML(c.label)}</option>`))
+            .concat(contatos.map(c => `<option value="${c.id}" ${c.id===selecionado?'selected':''}>${escapeHTML(c.label)}</option>`))
             .join('');
+        };
+        const preencherProjetos = (empresa, selecionado='') => {
+          const lista = empresa ? (empresaProjetosMap[empresa] || []) : todosProjetos;
+          projetoSelect.innerHTML = ['<option value="">—</option>']
+            .concat(lista.map(p => `<option value="${p.id}" ${p.id===selecionado?'selected':''}>${escapeHTML(p.label)}</option>`))
+            .join('');
+        };
+
+        empresaSelect.onchange = () => {
+          preencherContatos(empresaSelect.value);
+          preencherProjetos(empresaSelect.value);
+        };
+
+        projetoSelect.onchange = () => {
+          const empresaDoProjeto = projetoSelect.value ? (projetoEmpresaMap[projetoSelect.value] || '') : '';
+          const clienteDoProjeto = projetoSelect.value ? (projetoClienteMap[projetoSelect.value] || '') : '';
+          if (empresaDoProjeto) {
+            empresaSelect.value = empresaDoProjeto;
+            // Vincula direto o contato/cliente do projeto escolhido como Solicitante.
+            preencherContatos(empresaDoProjeto, clienteDoProjeto);
+            preencherProjetos(empresaDoProjeto, projetoSelect.value);
+          }
+          // Se o projeto escolhido não tem empresa associada, deixa a Empresa como está.
         };
 
         // Chips de tags: alterna seleção e sincroniza com o input hidden "tags"
@@ -737,6 +1027,7 @@ const App = {
           const data = UI.readForm(root.querySelector('#demandaForm'));
           if (!data.titulo) return UI.toast('Título obrigatório','warn');
           delete data.empresaSelecionada;
+          if (!data.criadoPorId) data.criadoPorId = this.currentUserPessoaId || '';
           data.tags = (data.tags||'').split(',').map(t=>t.trim()).filter(Boolean);
           data.tempoGasto = parseFloat(data.tempoGasto)||0;
           const record = {
@@ -768,10 +1059,12 @@ const App = {
   openDemandaDrawer(id, onVoltar=null) {
     const d = Store.demanda(id); if (!d) return;
     const cli = Store.cliente(d.clienteId), proj = Store.projeto(d.projetoId), resp = Store.pessoa(d.responsavelId);
+    const criador = Store.pessoa(d.criadoPorId);
     const checklist = (d.checklist||[]).map(c => `
       <label class="checklist-item">
         <input type="checkbox" data-ck="${c.id}" ${c.done?'checked':''}/>
-        <span style="${c.done?'text-decoration:line-through;color:var(--muted)':''}">${escapeHTML(c.texto)}</span>
+        <span style="flex:1;${c.done?'text-decoration:line-through;color:var(--muted)':''}">${escapeHTML(c.texto)}</span>
+        ${c.doneEm ? `<span style="font-size:11px;color:var(--text-2);white-space:nowrap;" title="Marcado em ${fmtDate(c.doneEm)}"><i class="fa-regular fa-clock"></i> ${fmtDate(c.doneEm)}</span>` : ''}
       </label>`).join('') || '<div class="empty" style="padding:12px">Sem itens.</div>';
     const comments = (d.comentarios||[]).map(c => `
       <div class="comment"><span class="who">${escapeHTML(c.autor)}</span><span class="when">${fmtDate(c.data)}</span><div>${escapeHTML(c.texto)}</div></div>`).join('') || '<div class="empty" style="padding:12px">Sem comentários.</div>';
@@ -789,7 +1082,9 @@ const App = {
           <div><b>Projeto:</b> ${escapeHTML(proj?.nome||'—')}</div>
           <div><b>Cliente:</b> ${escapeHTML(cli?.empresa||'—')}</div>
           <div><b>Solicitante:</b> ${escapeHTML(cli?.contato || cli?.nome || '—')}</div>
-          <div><b>Responsável:</b> ${escapeHTML(resp?.nome||'—')}</div>
+          <div><b>Executante:</b> ${escapeHTML(resp?.nome||'—')}</div>
+          <div><b>Criado por:</b> ${escapeHTML(criador?.nome||'—')}</div>
+          <div><b>Equipe:</b> ${UI.equipeAreaPill(d.equipeArea)}</div>
           <div><b>Prazo:</b> ${fmtDate(d.prazo)}</div>
           <div><b>Criada:</b> ${fmtDate(d.criacao)}</div>
           <div><b>Tempo gasto:</b> ${d.tempoGasto||0}h</div>
@@ -817,16 +1112,27 @@ const App = {
       onOpen: (root, close) => {
         root.querySelectorAll('[data-ck]').forEach(cb => cb.onchange = () => {
           const item = d.checklist.find(x=>x.id===cb.dataset.ck);
-          if (item) { item.done = cb.checked; Store.save(); this.openDemandaDrawer(id, onVoltar); }
+          if (item) {
+            item.done = cb.checked;
+            item.doneEm = cb.checked ? new Date().toISOString() : null;
+            d.historico = d.historico || [];
+            d.historico.push({ tipo:'checklist', data:new Date().toISOString(), texto:`Item do checklist ${cb.checked?'concluído':'reaberto'}: "${item.texto}"` });
+            Store.save(); this.openDemandaDrawer(id, onVoltar);
+          }
         });
         root.querySelector('#ckAdd').onclick = () => {
           const v = root.querySelector('#ckNew').value.trim(); if (!v) return;
-          d.checklist.push({ id: uid('ck'), texto:v, done:false });
+          d.checklist = d.checklist || [];
+          d.checklist.push({ id: uid('ck'), texto:v, done:false, doneEm:null });
+          d.historico = d.historico || [];
+          d.historico.push({ tipo:'checklist', data:new Date().toISOString(), texto:`Item adicionado ao checklist: "${v}"` });
           Store.save(); this.openDemandaDrawer(id, onVoltar);
         };
         root.querySelector('#cmAdd').onclick = () => {
           const v = root.querySelector('#cmNew').value.trim(); if (!v) return;
+          d.comentarios = d.comentarios || [];
           d.comentarios.push({ id: uid('cm'), autor:'Você', texto:v, data:new Date().toISOString() });
+          d.historico = d.historico || [];
           d.historico.push({ tipo:'comentario', data:new Date().toISOString(), texto:'Comentário adicionado' });
           Store.save(); this.openDemandaDrawer(id, onVoltar);
         };
@@ -839,7 +1145,8 @@ const App = {
   },
 
   /* ================== KANBAN ================== */
-  render_kanban(root) {
+  render_kanban(root, onChange) {
+    const doRender = onChange || (() => this.render());
     const f = this.filters.kanban;
     const cols = STATUS_ORDER.filter(s => s !== 'atrasado');
 
@@ -871,6 +1178,7 @@ const App = {
       Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR')).map(e=>`<option value="${e.id}" ${e.id===f.responsavel?'selected':''}>${escapeHTML(e.nome)}</option>`)
     ).join('');
     const prOpts = ['<option value="">Todas prioridades</option>'].concat(Object.keys(PRIORIDADE).map(p=>`<option value="${p}" ${p===f.prioridade?'selected':''}>${PRIORIDADE[p].label}</option>`)).join('');
+    const eqOpts = ['<option value="">Todas equipes</option>'].concat(Object.keys(EQUIPE_AREA).map(k=>`<option value="${k}" ${k===f.equipe?'selected':''}>${EQUIPE_AREA[k].label}</option>`)).join('');
 
     const matches = (d) => {
       if (f.q) {
@@ -882,6 +1190,7 @@ const App = {
       if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(d.clienteId)) return false;
       if (f.projeto && d.projetoId !== f.projeto) return false;
       if (f.responsavel && d.responsavelId !== f.responsavel) return false;
+      if (f.equipe && d.equipeArea !== f.equipe) return false;
       if (f.prioridade && d.prioridade !== f.prioridade) return false;
       return true;
     };
@@ -896,6 +1205,7 @@ const App = {
         <select id="fcli">${cliOpts}</select>
         <select id="fproj">${projOpts}</select>
         <select id="fresp">${respOpts}</select>
+        <select id="feq">${eqOpts}</select>
         <select id="fpr">${prOpts}</select>
         <button class="btn btn-sm" id="fclear"><i class="fa-solid fa-eraser"></i></button>
       </div>
@@ -914,15 +1224,21 @@ const App = {
         }).join('')}
       </div>`;
     $('#btnNovo').onclick = () => this.openDemandaModal();
-    $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; this.render(); }, 150));
-    ['fcli','fproj','fresp','fpr'].forEach(id => $('#'+id).onchange = e => {
-      const map = { fcli:'cliente', fproj:'projeto', fresp:'responsavel', fpr:'prioridade' };
+    $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; doRender(); }, 150));
+    ['fcli','fproj','fresp','feq','fpr'].forEach(id => $('#'+id).onchange = e => {
+      const map = { fcli:'cliente', fproj:'projeto', fresp:'responsavel', feq:'equipe', fpr:'prioridade' };
       f[map[id]] = e.target.value;
       if (id === 'fcli') f.projeto = ''; // troca de cliente reseta o projeto selecionado
-      this.render();
+      if (id === 'fproj') {
+        // Ao escolher um projeto, já vincula o filtro de Cliente à empresa daquele projeto.
+        const proj = f.projeto ? Store.projeto(f.projeto) : null;
+        const cli = proj?.clienteId ? Store.cliente(proj.clienteId) : null;
+        f.cliente = cli ? (cli.empresa||'').trim() : f.cliente;
+      }
+      doRender();
     });
-    $('#fclear').onclick = () => { this.filters.kanban = { q:'',cliente:'',projeto:'',responsavel:'',prioridade:'' }; this.render(); };
-    this.bindKanbanDrag();
+    $('#fclear').onclick = () => { this.filters.kanban = { q:'',cliente:'',projeto:'',responsavel:'',equipe:'',prioridade:'' }; doRender(); };
+    this.bindKanbanDrag(doRender);
 
     function cardHTML(d) {
       const resp = Store.pessoa(d.responsavelId);
@@ -934,6 +1250,7 @@ const App = {
           <span>${UI.prioPill(d.prioridade)}</span>
           <span>${fmtDate(d.prazo)}</span>
         </div>
+        ${d.equipeArea ? `<div style="margin-top:6px;">${UI.equipeAreaPill(d.equipeArea)}</div>` : ''}
         <div class="k-card-tags">${(d.tags||[]).map(t=>`<span class="k-tag">${escapeHTML(t)}</span>`).join('')}</div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
           <div class="avatar" style="width:24px;height:24px;font-size:10px">${initials(resp?.nome||'?')}</div>
@@ -942,7 +1259,8 @@ const App = {
       </div>`;
     }
   },
-  bindKanbanDrag() {
+  bindKanbanDrag(onChange) {
+    const doRender = onChange || (() => this.render());
     const kb = $('#kb'); if (!kb) return;
     this.stopKanbanAutoScroll();
     let dragId = null;
@@ -996,8 +1314,8 @@ const App = {
           d.historico = d.historico || [];
           d.historico.push({ tipo:'status', data:new Date().toISOString(), texto:`Status alterado: ${STATUS[d.status].label} → ${STATUS[newStatus].label}` });
           d.status = newStatus;
-          Store.save(); UI.toast('Status atualizado','success');
-          this.render();
+          Store.upsert('demandas', d); UI.toast('Status atualizado','success');
+          doRender();
         }
       });
     });
@@ -1024,7 +1342,8 @@ const App = {
 
   /* ================== CALENDÁRIO ================== */
   calDate: new Date(),
-  render_calendario(root) {
+  render_calendario(root, onChange) {
+    const doRender = onChange || (() => this.render());
     const f = this.filters.calendario;
     const ref = new Date(this.calDate.getFullYear(), this.calDate.getMonth(), 1);
     const monthName = ref.toLocaleDateString('pt-BR',{ month:'long', year:'numeric' });
@@ -1094,15 +1413,23 @@ const App = {
           ${this.buildCalendarCells(ref, matches)}
         </div>
       </div>`;
-    $('#prev').onclick = () => { this.calDate = new Date(ref.getFullYear(), ref.getMonth()-1, 1); this.render(); };
-    $('#next').onclick = () => { this.calDate = new Date(ref.getFullYear(), ref.getMonth()+1, 1); this.render(); };
-    $('#hoje').onclick = () => { this.calDate = new Date(); this.render(); };
-    $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; this.render(); };
-    ['fproj','fresp','fpr'].forEach(id => $('#'+id).onchange = e => {
-      const map = { fproj:'projeto', fresp:'responsavel', fpr:'prioridade' };
-      f[map[id]] = e.target.value; this.render();
+    $('#prev').onclick = () => { this.calDate = new Date(ref.getFullYear(), ref.getMonth()-1, 1); doRender(); };
+    $('#next').onclick = () => { this.calDate = new Date(ref.getFullYear(), ref.getMonth()+1, 1); doRender(); };
+    $('#hoje').onclick = () => { this.calDate = new Date(); doRender(); };
+    $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; doRender(); };
+    $('#fproj').onchange = e => {
+      f.projeto = e.target.value;
+      // Ao escolher um projeto, já vincula o filtro de Cliente à empresa daquele projeto.
+      const proj = f.projeto ? Store.projeto(f.projeto) : null;
+      const cli = proj?.clienteId ? Store.cliente(proj.clienteId) : null;
+      f.cliente = cli ? (cli.empresa||'').trim() : f.cliente;
+      doRender();
+    };
+    ['fresp','fpr'].forEach(id => $('#'+id).onchange = e => {
+      const map = { fresp:'responsavel', fpr:'prioridade' };
+      f[map[id]] = e.target.value; doRender();
     });
-    $('#fclear').onclick = () => { this.filters.calendario = { cliente:'',projeto:'',responsavel:'',prioridade:'' }; this.render(); };
+    $('#fclear').onclick = () => { this.filters.calendario = { cliente:'',projeto:'',responsavel:'',prioridade:'' }; doRender(); };
     $$('.cal-item').forEach(el => el.onclick = (e) => { e.stopPropagation(); this.openDemandaDrawer(el.dataset.id); });
     $$('.cal-more').forEach(el => el.onclick = (e) => { e.stopPropagation(); this.openDiaDemandasModal(el.dataset.date); });
     $$('.cal-day.has-items').forEach(el => el.onclick = () => this.openDiaDemandasModal(el.dataset.date));
@@ -1133,7 +1460,7 @@ const App = {
       return `<div class="dashboard-modal-item" data-open-dem="${d.id}" style="cursor:pointer;">
         <div>
           <strong>${escapeHTML(d.titulo)}</strong>
-          <span>${escapeHTML(cli?.empresa || 'Sem cliente')} · ${escapeHTML(proj?.nome || 'Sem projeto')} · ${escapeHTML(resp?.nome || 'Sem responsável')}</span>
+          <span>${escapeHTML(cli?.empresa || 'Sem cliente')} · ${escapeHTML(proj?.nome || 'Sem projeto')} · ${escapeHTML(resp?.nome || 'Sem executante')}</span>
         </div>
         ${UI.statusPill(isLate(d) ? 'atrasado' : d.status)}
       </div>`;
@@ -1272,6 +1599,7 @@ const App = {
         this.drawTimelineBody();
       });
 
+      const { textColor: tlTextColor, gridColor: tlGridColor } = this.chartTheme();
       this.charts.tlProgress = new Chart($('#chartTlProgress'), {
         type:'bar',
         data:{
@@ -1280,7 +1608,10 @@ const App = {
         },
         options:{
           maintainAspectRatio:false, indexAxis:'y',
-          scales:{ x:{ min:0, max:100 }, y:{ ticks:{ autoSkip:false, font:{ size:10 } } } },
+          scales:{
+            x:{ min:0, max:100, ticks:{ color: tlTextColor }, grid:{ color: tlGridColor } },
+            y:{ ticks:{ autoSkip:false, font:{ size:10 }, color: tlTextColor }, grid:{ color: tlGridColor } }
+          },
           plugins:{ legend:{ display:false }, tooltip:{ callbacks:{
             title: items => (items[0]?.label instanceof Array ? items[0].label.join(' ') : items[0]?.label),
             label: ctx => `${ctx.raw}% concluído`
@@ -1332,31 +1663,27 @@ const App = {
         </div>
       </div>
       ${projsComData.length ? `
-      <div class="gantt" style="margin-top:16px;">
-        <div style="display:grid;grid-template-columns:220px 1fr;gap:12px;font-size:11px;color:var(--text-2);font-weight:700;margin-bottom:10px;">
-          <div>PROJETO</div><div>Cronograma</div>
-        </div>
-        ${(() => {
-          const minDate = new Date(Math.min(...projsComData.map(p=>new Date(p.inicio))));
-          const maxDate = new Date(Math.max(...projsComData.map(p=>new Date(p.prazo))));
-          const total = Math.max(1, daysBetween(minDate, maxDate));
-          return projsComData.map(p => {
-            const start = daysBetween(minDate, p.inicio);
-            const dur = Math.max(1, daysBetween(p.inicio, p.prazo));
-            const left = (start/total)*100;
-            const width = (dur/total)*100;
-            return `<div class="gantt-row">
-              <div class="gantt-label" title="${escapeHTML(p.nome)}">${escapeHTML(p.nome)}</div>
-              <div class="gantt-track">
-                <div class="gantt-bar" style="left:${left}%;width:${width}%;background:linear-gradient(90deg,${STATUS[p.status].color},#8b5cf6)">${escapeHTML(p.nome)}</div>
-              </div>
-            </div>`;
-          }).join('');
-        })()}
+      <div class="timeline-proj-list" style="margin-top:16px;">
+        <div style="font-size:11px;color:var(--text-2);font-weight:700;margin-bottom:10px;">PROJETOS</div>
+        ${projsComData.map(p => {
+          const demsProj = Store.demandas().filter(d => d.projetoId === p.id);
+          const concluidasProj = demsProj.filter(d => d.status==='concluido').length;
+          const progressoProj = demsProj.length ? Math.round((concluidasProj/demsProj.length)*100) : 0;
+          return `<div class="timeline-proj-item" data-proj="${p.id}" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);margin-bottom:8px;">
+            <div style="min-width:0;">
+              <strong style="display:block;font-size:13px;">${escapeHTML(p.nome)}</strong>
+              <span style="display:block;margin-top:4px;color:var(--text-2);font-size:12px;">Início: ${fmtDate(p.inicio)} · Prazo: ${fmtDate(p.prazo)} · ${demsProj.length} demanda(s) · ${progressoProj}% concluído</span>
+            </div>
+            ${UI.statusPill(p.status)}
+          </div>`;
+        }).join('')}
       </div>` : ''}
     `;
 
+    body.querySelectorAll('[data-proj]').forEach(el => el.onclick = () => this.openTimelineProjeto(el.dataset.proj));
+
     if (dems.length) {
+      const { textColor: tlpTextColor, gridColor: tlpGridColor } = this.chartTheme();
       this.charts.tlProjetos = new Chart($('#chartTlProjetos'), {
         type:'bar',
         data:{
@@ -1365,11 +1692,38 @@ const App = {
         },
         options:{
           maintainAspectRatio:false, indexAxis:'y',
-          scales:{ x:{ min:0, ticks:{ precision:0 } } },
+          scales:{
+            x:{ min:0, ticks:{ precision:0, color: tlpTextColor }, grid:{ color: tlpGridColor } },
+            y:{ ticks:{ color: tlpTextColor }, grid:{ color: tlpGridColor } }
+          },
           plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label: ctx => `${ctx.raw} demanda(s)` } } }
         }
       });
     }
+  },
+
+  openTimelineProjeto(projetoId) {
+    const p = Store.projeto(projetoId);
+    if (!p) return;
+    const cliente = Store.cliente(p.clienteId);
+    const responsavel = Store.pessoa(p.responsavelId);
+    const dems = Store.demandas().filter(d => d.projetoId === p.id);
+    const body = `
+      <div class="dashboard-modal-item" style="margin-bottom:14px;">
+        <div>
+          <strong>${escapeHTML(p.nome)}</strong>
+          <span>${escapeHTML(cliente?.empresa || 'Sem cliente')} · Executante: ${escapeHTML(responsavel?.nome || '—')} · Início: ${fmtDate(p.inicio)} · Prazo: ${fmtDate(p.prazo)}</span>
+        </div>
+        ${UI.statusPill(p.status)}
+      </div>
+      ${dems.length ? `<div class="dashboard-modal-list">${dems.map(d => {
+        const respD = Store.pessoa(d.responsavelId);
+        return `<div class="dashboard-modal-item"><div><strong>${escapeHTML(d.titulo)}</strong><span>${escapeHTML(respD?.nome || 'Sem executante')} · Prazo: ${fmtDate(d.prazo)}</span></div>${UI.statusPill(isLate(d) ? 'atrasado' : d.status)}</div>`;
+      }).join('')}</div>` : UI.emptyState('list-check','Nenhuma demanda cadastrada para este projeto.')}
+    `;
+    UI.modal({ title: p.nome, size:'lg', body, footer:'<button class="btn" data-close-modal>Fechar</button>', onOpen: (root, close) => {
+      root.querySelector('[data-close-modal]').onclick = close;
+    }});
   },
 
   /* ================== REUNIÕES ================== */
@@ -1421,9 +1775,26 @@ const App = {
     const empresaOpts = empresasUnicas.map(emp => ({ value: emp, label: emp }));
     const projOpts = Store.projetos().map(p=>({value:p.id,label:p.nome}));
 
-    // Empresa atualmente selecionada, a partir do clienteId salvo na reunião (se houver)
+    // Empresa de cada projeto (via projeto.clienteId -> cliente.empresa), para filtro cruzado
+    const empresaDoProjeto = {};
+    Store.projetos().forEach(p => {
+      const c = p.clienteId ? Store.cliente(p.clienteId) : null;
+      empresaDoProjeto[p.id] = c ? (c.empresa||'').trim() : '';
+    });
+    // Empresa -> lista de projetos daquela empresa
+    const projetosPorEmpresa = {};
+    Store.projetos().forEach(p => {
+      const emp = empresaDoProjeto[p.id];
+      if (!emp) return;
+      (projetosPorEmpresa[emp] = projetosPorEmpresa[emp] || []).push({ id: p.id, label: p.nome });
+    });
+
+    // Empresa atualmente selecionada: prioriza a empresa do projeto já salvo (se houver);
+    // senão cai na empresa do contato (clienteId) salvo na reunião.
+    const projetoAtual = m?.projetoId ? Store.projeto(m.projetoId) : null;
     const clienteAtual = m?.clienteId ? Store.cliente(m.clienteId) : null;
-    const empresaAtual = clienteAtual ? (clienteAtual.empresa||'').trim() : '';
+    const empresaAtual = (projetoAtual ? empresaDoProjeto[projetoAtual.id] : '') || (clienteAtual ? (clienteAtual.empresa||'').trim() : '');
+    const projOptsFiltrados = empresaAtual ? (projetosPorEmpresa[empresaAtual]||[]) : projOpts;
 
     // Participantes previamente salvos (nomes livres, separados por vírgula) — usados para pré-marcar chips
     const participantesAtuais = (m?.participantes||'').split(',').map(s=>s.trim()).filter(Boolean);
@@ -1455,7 +1826,7 @@ const App = {
           <div class="field"><label>Cliente (Empresa)</label>${UI.select('empresaSelecionada',[{value:'',label:'—'},...empresaOpts], empresaAtual)}</div>
           <div class="field"><label>Hora início</label><input type="time" name="horaInicio" value="${escapeHTML(m?.horaInicio||'09:00')}"/></div>
           <div class="field"><label>Hora fim</label><input type="time" name="horaFim" value="${escapeHTML(m?.horaFim||'10:00')}"/></div>
-          <div class="field"><label>Projeto</label>${UI.select('projetoId',[{value:'',label:'—'},...projOpts], m?.projetoId||'')}</div>
+          <div class="field"><label>Projeto</label>${UI.select('projetoId',[{value:'',label:'—'},...projOptsFiltrados], m?.projetoId||'')}</div>
           <div class="field full">
             <label>Participantes — Equipe</label>
             <div class="tag-picker" id="equipePicker">${equipeChips}</div>
@@ -1494,13 +1865,39 @@ const App = {
         bindContatoChips();
         syncHidden();
 
-        root.querySelector('select[name="empresaSelecionada"]').onchange = (e) => {
+        const projetoSelect = root.querySelector('select[name="projetoId"]');
+        const empresaSelect = root.querySelector('select[name="empresaSelecionada"]');
+
+        const rebuildProjOpts = (empresa, keepValue='') => {
+          const opts = empresa && projetosPorEmpresa[empresa] ? projetosPorEmpresa[empresa] : projOpts;
+          projetoSelect.innerHTML = [{value:'',label:'—'},...opts].map(o =>
+            `<option value="${escapeHTML(o.value)}" ${o.value===keepValue?'selected':''}>${escapeHTML(o.label)}</option>`
+          ).join('');
+        };
+
+        empresaSelect.onchange = (e) => {
           const empresa = e.target.value;
           contatoPicker.innerHTML = renderContatosChips(empresa);
           bindContatoChips();
           syncHidden();
           // Guarda o id do primeiro cliente daquela empresa (mantém compatibilidade com clienteId em outras telas)
           clienteIdInput.value = empresa && empresaMap[empresa] ? (empresaMap[empresa][0]?.id || '') : '';
+          // Filtra o dropdown de projeto pra mostrar só os projetos daquela empresa
+          rebuildProjOpts(empresa);
+        };
+
+        projetoSelect.onchange = (e) => {
+          const projId = e.target.value;
+          if (!projId) return;
+          const empresa = empresaDoProjeto[projId];
+          if (!empresa || empresa === empresaSelect.value) return;
+          // Ao escolher um projeto, sincroniza a empresa (e contatos) selecionada automaticamente
+          empresaSelect.value = empresa;
+          contatoPicker.innerHTML = renderContatosChips(empresa);
+          bindContatoChips();
+          syncHidden();
+          clienteIdInput.value = empresaMap[empresa] ? (empresaMap[empresa][0]?.id || '') : '';
+          rebuildProjOpts(empresa, projId);
         };
 
         root.querySelector('#saveReuniao').onclick = () => {
@@ -1531,8 +1928,9 @@ const App = {
     const listSection = (titulo, campo, placeholder) => {
       const itens = m[campo] || [];
       const rows = itens.map(item => `
-        <div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
-          <div style="font-size:12px;flex:1;">${escapeHTML(item.texto)}</div>
+        <div class="list-item-row" data-item="${campo}:${item.id}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
+          <div class="list-item-text" style="font-size:12px;flex:1;white-space:pre-wrap;">${escapeHTML(item.texto)}</div>
+          <button class="row-btn" data-edit="${campo}:${item.id}" title="Editar"><i class="fa-solid fa-pen"></i></button>
           <button class="row-btn" data-del="${campo}:${item.id}" title="Remover"><i class="fa-solid fa-xmark"></i></button>
         </div>`).join('') || '<div class="empty" style="padding:8px 0;font-size:12px;">Nada registrado.</div>';
       return `
@@ -1625,10 +2023,51 @@ const App = {
         const refreshList = (campo) => {
           const itens = m[campo] || [];
           root.querySelector(`#list-${campo}`).innerHTML = itens.map(item => `
-            <div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
-              <div style="font-size:12px;flex:1;">${escapeHTML(item.texto)}</div>
+            <div class="list-item-row" data-item="${campo}:${item.id}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
+              <div class="list-item-text" style="font-size:12px;flex:1;white-space:pre-wrap;">${escapeHTML(item.texto)}</div>
+              <button class="row-btn" data-edit="${campo}:${item.id}" title="Editar"><i class="fa-solid fa-pen"></i></button>
               <button class="row-btn" data-del="${campo}:${item.id}" title="Remover"><i class="fa-solid fa-xmark"></i></button>
             </div>`).join('') || '<div class="empty" style="padding:8px 0;font-size:12px;">Nada registrado.</div>';
+          bindListRow(campo);
+        };
+
+        // Troca uma linha da lista pelo modo de edição (textarea + Salvar/Cancelar),
+        // permitindo corrigir erros de digitação sem precisar excluir e recriar o item.
+        const startEdit = (campo, itemId) => {
+          const item = (m[campo]||[]).find(x => x.id === itemId);
+          if (!item) return;
+          const rowEl = root.querySelector(`[data-item="${campo}:${itemId}"]`);
+          if (!rowEl) return;
+          rowEl.innerHTML = `
+            <div style="display:flex;flex-direction:column;gap:6px;flex:1;">
+              <textarea class="list-entry-input" rows="1" style="width:100%;">${escapeHTML(item.texto)}</textarea>
+              <div style="display:flex;gap:6px;">
+                <button class="btn btn-sm btn-primary" data-save-edit="${campo}:${itemId}"><i class="fa-solid fa-check"></i> Salvar</button>
+                <button class="btn btn-sm" data-cancel-edit="${campo}:${itemId}">Cancelar</button>
+              </div>
+            </div>`;
+          const ta = rowEl.querySelector('textarea');
+          const fit = () => { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight}px`; };
+          ta.addEventListener('input', fit);
+          fit();
+          ta.focus();
+          ta.setSelectionRange(ta.value.length, ta.value.length);
+
+          rowEl.querySelector('[data-save-edit]').onclick = () => {
+            const v = ta.value.trim();
+            if (!v) { UI.toast('O texto não pode ficar vazio', 'warn'); return; }
+            item.texto = v;
+            Store.save();
+            refreshList(campo);
+          };
+          rowEl.querySelector('[data-cancel-edit]').onclick = () => refreshList(campo);
+        };
+
+        const bindListRow = (campo) => {
+          root.querySelectorAll(`[data-edit^="${campo}:"]`).forEach(btn => btn.onclick = () => {
+            const [,itemId] = btn.dataset.edit.split(':');
+            startEdit(campo, itemId);
+          });
           root.querySelectorAll(`[data-del^="${campo}:"]`).forEach(btn => btn.onclick = () => {
             const [,itemId] = btn.dataset.del.split(':');
             m[campo] = (m[campo]||[]).filter(x => x.id !== itemId);
@@ -1650,11 +2089,7 @@ const App = {
             fitInput();
             Store.save(); refreshList(campo);
           };
-          root.querySelectorAll(`[data-del^="${campo}:"]`).forEach(btn => btn.onclick = () => {
-            const [,itemId] = btn.dataset.del.split(':');
-            m[campo] = (m[campo]||[]).filter(x => x.id !== itemId);
-            Store.save(); refreshList(campo);
-          });
+          bindListRow(campo);
         });
 
         const refreshAnexos = () => {
@@ -1879,7 +2314,7 @@ const App = {
     const projsConcl = Store.projetos().filter(p=>p.status==='concluido').length;
     const projsAtr = Store.projetos().filter(p=> p.prazo && new Date(p.prazo) < today() && p.status!=='concluido').length;
 
-    const table = (rows) => `<table><thead><tr><th>Nome</th><th>Total</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHTML(r[0])}</td><td>${r[1]}</td></tr>`).join('')}</tbody></table>`;
+    const table = (rows) => `<table class="report-table"><thead><tr><th>Nome</th><th>Total</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHTML(r[0])}</td><td>${r[1]}</td></tr>`).join('')}</tbody></table>`;
 
     root.innerHTML = `
       <div class="page-header">
@@ -1897,7 +2332,7 @@ const App = {
       </div>
       <div class="charts-grid">
         <div class="chart-card col-6"><h3>Demandas por Cliente</h3><div class="table-wrap">${table(Object.entries(porCliente).sort((a,b)=>b[1]-a[1]))}</div></div>
-        <div class="chart-card col-6"><h3>Demandas por Responsável</h3><div class="table-wrap">${table(Object.entries(porResp).sort((a,b)=>b[1]-a[1]))}</div></div>
+        <div class="chart-card col-6"><h3>Demandas por Executante</h3><div class="table-wrap">${table(Object.entries(porResp).sort((a,b)=>b[1]-a[1]))}</div></div>
       </div>`;
     $('#btnPdf').onclick = () => this.exportRelatorioPDF();
     $('#btnCsv').onclick = () => this.exportDemandsCSV();
@@ -1944,6 +2379,7 @@ const App = {
     const rows = Store.demandas().map(d => ({
       titulo:d.titulo, projeto:Store.projeto(d.projetoId)?.nome||'',
       cliente:Store.cliente(d.clienteId)?.empresa||'', responsavel:Store.pessoa(d.responsavelId)?.nome||'',
+      equipe:EQUIPE_AREA[d.equipeArea]?.label||'',
       status:STATUS[d.status]?.label, prioridade:PRIORIDADE[d.prioridade]?.label,
       criacao:fmtDate(d.criacao), prazo:fmtDate(d.prazo), tempoGasto:d.tempoGasto,
       tags:(d.tags||[]).join(', ')
@@ -2029,6 +2465,10 @@ const App = {
             const prioLabel = (row.prioridade||'').trim().toLowerCase();
             const prioCode = Object.keys(PRIORIDADE).find(p => PRIORIDADE[p].label.toLowerCase() === prioLabel) || 'normal';
 
+            // Resolve equipe pelo label (padrão: vazio)
+            const equipeLabel = (row.equipe||'').trim().toLowerCase();
+            const equipeArea = Object.keys(EQUIPE_AREA).find(e => EQUIPE_AREA[e].label.toLowerCase() === equipeLabel) || '';
+
             // Converte datas dd/mm/aaaa para ISO
             const parseBRDate = (s) => {
               s = (s||'').trim(); if (!s || s === '—') return '';
@@ -2052,6 +2492,7 @@ const App = {
             const registro = {
               id: existente?.id || uid('d'),
               titulo, projetoId, clienteId, responsavelId,
+              equipeArea: equipeArea || existente?.equipeArea || '',
               status: statusCode, prioridade: prioCode,
               criacao, prazo, tempoGasto, tags,
               descricao: existente?.descricao || '',
@@ -2181,7 +2622,7 @@ const App = {
   exportRelatorioPDF() {
     const dems = Store.demandas();
     const body = `<h2>Relatório de Demandas</h2>
-      <table><thead><tr><th>Título</th><th>Cliente</th><th>Responsável</th><th>Status</th><th>Prazo</th><th>Tempo (h)</th></tr></thead>
+      <table><thead><tr><th>Título</th><th>Cliente</th><th>Executante</th><th>Status</th><th>Prazo</th><th>Tempo (h)</th></tr></thead>
       <tbody>${dems.map(d=>`<tr><td>${escapeHTML(d.titulo)}</td><td>${escapeHTML(Store.cliente(d.clienteId)?.empresa||'')}</td><td>${escapeHTML(Store.pessoa(d.responsavelId)?.nome||'')}</td><td>${STATUS[d.status]?.label}</td><td>${fmtDate(d.prazo)}</td><td>${d.tempoGasto||0}</td></tr>`).join('')}</tbody></table>`;
     exportPDF('FlowDesk — Relatório', body);
   }
