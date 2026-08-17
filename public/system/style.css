@@ -211,11 +211,18 @@ body { background: var(--bg); color: var(--text); }
   background:var(--surface); border:1px solid var(--border);
   border-radius: var(--radius); overflow:hidden; box-shadow: var(--shadow-sm);
 }
-table { width:100%; border-collapse: collapse; }
+table { width:100%; border-collapse: collapse; table-layout:fixed; }
 th, td {
   text-align:left; padding:12px 14px; font-size:13px;
   border-bottom:1px solid var(--border);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+/* Título pode quebrar/ocupar mais espaço; as demais colunas ficam sempre em uma linha só */
+th:first-child, td:first-child {
+  white-space:normal; overflow-wrap:break-word; width:22%;
+}
+/* Coluna de ações (última) só precisa do espaço dos ícones */
+th:last-child, td:last-child { width:1%; white-space:nowrap; }
 th {
   background: var(--surface-2); color:var(--text-2); font-weight:600;
   text-transform:uppercase; font-size:11px; letter-spacing:.05em;
@@ -517,6 +524,26 @@ body.dark .status.atrasado { background:#450a0a; color:#fca5a5; }
 }
 .list-entry-input:focus { outline:none; border-color:var(--primary); }
 
+.list-item-row { position:relative; }
+.list-item-row .list-item-text { padding-right:4px; }
+.row-btn {
+  flex:0 0 auto;
+  width:26px;
+  height:26px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:var(--surface-2);
+  color:var(--text-2);
+  cursor:pointer;
+  font-size:11px;
+  transition:background .15s, color .15s, border-color .15s;
+}
+.row-btn:hover { background:var(--surface-3, var(--surface-2)); color:var(--text); border-color:var(--primary); }
+.row-btn[data-del]:hover, .row-btn[data-del-anexo]:hover { color:var(--danger); border-color:var(--danger); }
+
 /* Impede que textos longos sem espaços escapem dos cartões e painéis. */
 #drawer-body,
 #drawer-body div,
@@ -532,19 +559,19 @@ td {
   word-break: break-word;
 }
 
-/* Fechar o menu quando o zoom acionar o layout responsivo. */
-.sidebar-close { display:none; }
-@media (max-width: 900px) {
-  .sidebar-close {
-    display:grid;
-    place-items:center;
-    position:absolute;
-    top:14px;
-    right:14px;
-    z-index:1;
-  }
-  .sidebar .brand { padding-right:46px; }
+/* Botão único de menu (hambúrguer), movido para dentro do sidebar via JS.
+   Substitui os antigos dois botões (hambúrguer na topbar + "X" no sidebar). */
+.sidebar-toggle {
+  position:absolute;
+  top:14px;
+  right:14px;
+  z-index:1;
 }
+.sidebar { position:sticky; } /* garante contexto de posicionamento para o botão absoluto */
+.sidebar .brand { padding-right:46px; }
+
+#app.sidebar-collapsed .sidebar .brand { padding-right:0; }
+#app.sidebar-collapsed .sidebar-toggle { position:static; margin:0 auto 6px; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width:10px; height:10px; }
@@ -764,11 +791,18 @@ body { background: var(--bg); color: var(--text); }
   background:var(--surface); border:1px solid var(--border);
   border-radius: var(--radius); overflow:hidden; box-shadow: var(--shadow-sm);
 }
-table { width:100%; border-collapse: collapse; }
+table { width:100%; border-collapse: collapse; table-layout:fixed; }
 th, td {
   text-align:left; padding:12px 14px; font-size:13px;
   border-bottom:1px solid var(--border);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+/* Título pode quebrar/ocupar mais espaço; as demais colunas ficam sempre em uma linha só */
+th:first-child, td:first-child {
+  white-space:normal; overflow-wrap:break-word; width:22%;
+}
+/* Coluna de ações (última) só precisa do espaço dos ícones */
+th:last-child, td:last-child { width:1%; white-space:nowrap; }
 th {
   background: var(--surface-2); color:var(--text-2); font-weight:600;
   text-transform:uppercase; font-size:11px; letter-spacing:.05em;
@@ -1054,3 +1088,28 @@ body.dark .status.atrasado { background:#450a0a; color:#fca5a5; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius:10px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+/* ============ FlowDesk — Área do Cliente (workspace) ============ */
+.c360-tabs { display:flex; gap:6px; flex-wrap:wrap; border-bottom:1px solid var(--border); margin-bottom:16px; padding-bottom:0; }
+.c360-tab {
+  display:flex; align-items:center; gap:8px; padding:10px 16px; border:none; background:transparent;
+  color:var(--text-2); font-weight:600; font-size:13px; cursor:pointer; border-radius:10px 10px 0 0;
+  border-bottom:2px solid transparent; transition:.15s;
+}
+.c360-tab:hover { color:var(--text); background:var(--surface-2); }
+.c360-tab.active { color:var(--primary); border-bottom-color:var(--primary); background:var(--surface-2); }
+.c360-tab-count { background:var(--surface-2); color:var(--text-2); border-radius:10px; padding:1px 7px; font-size:11px; font-weight:700; }
+.c360-tab.active .c360-tab-count { background:var(--primary-soft); color:var(--primary); }
+
+.cards-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+@media (max-width: 900px) { .cards-grid { grid-template-columns:repeat(2,1fr); } }
+.kpi-card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px; }
+.kpi-label { font-size:12px; color:var(--text-2); font-weight:600; margin-bottom:6px; }
+.kpi-value { font-size:26px; font-weight:800; color:var(--text); }
+.link-like:hover { color:var(--primary); text-decoration:underline; }
+/* Tabelas de relatório (Demandas por Cliente / Executante): 2 colunas simples.
+   table-layout:fixed + th:first-child{width:22%} deixava a coluna "Total"
+   espremida/cortada quando o nome do cliente/executante era longo — aqui ela
+   fica sempre com largura fixa e visível, e o Nome trunca com "...". */
+.report-table { table-layout:auto; }
+.report-table th:first-child, .report-table td:first-child { width:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.report-table th:last-child, .report-table td:last-child { width:60px; text-align:right; white-space:nowrap; }
