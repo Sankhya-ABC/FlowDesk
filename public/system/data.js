@@ -38,14 +38,23 @@ function seed() {
   return { clientes, projetos, demandas, equipe, reunioes, notificacoes: gerarNotificacoes(demandas) };
 }
 
-function gerarNotificacoes(demandas) {
+function gerarNotificacoes(demandas, anteriores=[]) {
+  // Preserva id/estado "lida" das notificações já existentes (chave: demandaId),
+  // pra não "ressuscitar" como não lida algo que o usuário já marcou como lido.
+  const anterioresPorDemanda = {};
+  (anteriores||[]).forEach(n => { if (n.demandaId) anterioresPorDemanda[n.demandaId] = n; });
+
   const late = demandas.filter(isLate).slice(0,5);
-  return late.map(d => ({
-    id: uid('n'), tipo:'atraso', demandaId: d.id,
-    titulo: `Demanda atrasada: ${d.titulo}`,
-    sub: `Prazo: ${fmtDate(d.prazo)}`,
-    lida: false, data: new Date().toISOString()
-  }));
+  return late.map(d => {
+    const prev = anterioresPorDemanda[d.id];
+    return {
+      id: prev ? prev.id : uid('n'), tipo:'atraso', demandaId: d.id,
+      titulo: `Demanda atrasada: ${d.titulo}`,
+      sub: `Prazo: ${fmtDate(d.prazo)}`,
+      lida: prev ? prev.lida : false,
+      data: prev ? prev.data : new Date().toISOString()
+    };
+  });
 }
 
 /* ------------- Store -------------
@@ -98,7 +107,7 @@ const Store = {
       if (isLate(d) && d.status !== 'concluido' && d.status !== 'cancelado') d._late = true;
       else d._late = false;
     });
-    this.state.notificacoes = gerarNotificacoes(this.state.demandas);
+    this.state.notificacoes = gerarNotificacoes(this.state.demandas, this.state.notificacoes);
     this.save();
   },
 
