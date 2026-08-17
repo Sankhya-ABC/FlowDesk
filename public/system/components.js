@@ -79,6 +79,11 @@ UI.prioPill = (p) => {
   const pr = PRIORIDADE[p] || PRIORIDADE.normal;
   return `<span class="prio"><span class="dot ${p}"></span>${pr.label}</span>`;
 };
+UI.equipeAreaPill = (e) => {
+  if (!e || !EQUIPE_AREA[e]) return '<span style="color:var(--text-2)">—</span>';
+  const ea = EQUIPE_AREA[e];
+  return `<span class="status" style="background:${ea.color}22;color:${ea.color}"><span class="dot" style="background:${ea.color}"></span>${ea.label}</span>`;
+};
 
 UI.select = (name, options, selected, extra='') =>
   `<select name="${name}" ${extra}>${options.map(o =>
@@ -119,7 +124,7 @@ UI.projetoForm = (p={}) => {
   <form id="projetoForm" class="form-grid">
     <div class="field full"><label>Nome *</label><input name="nome" required value="${escapeHTML(p.nome||'')}"/></div>
     <div class="field"><label>Cliente *</label>${UI.select('clienteId',[{value:'',label:'Selecione...'},...cliOpts], p.clienteId||'','required')}</div>
-    <div class="field"><label>Responsável</label>${UI.select('responsavelId',[{value:'',label:'—'},...respOpts], p.responsavelId||'')}</div>
+    <div class="field"><label>Executante</label>${UI.select('responsavelId',[{value:'',label:'—'},...respOpts], p.responsavelId||'')}</div>
     <div class="field"><label>Data início</label><input type="date" name="inicio" value="${p.inicio?isoDay(p.inicio):''}"/></div>
     <div class="field"><label>Prazo</label><input type="date" name="prazo" value="${p.prazo?isoDay(p.prazo):''}"/></div>
     <div class="field"><label>Status</label>${UI.select('status',stOpts,p.status||'backlog')}</div>
@@ -129,7 +134,7 @@ UI.projetoForm = (p={}) => {
   </form>`;
 };
 
-UI.demandaForm = (d={}) => {
+UI.demandaForm = (d={}, opts={}) => {
   const clientesAll = Store.clientes();
   // Agrupa clientes por empresa (nome exato), removendo duplicatas de empresa no dropdown
   const empresaMap = {};
@@ -146,24 +151,54 @@ UI.demandaForm = (d={}) => {
   const stOpts = STATUS_ORDER.filter(s=>s!=='atrasado').map(s=>({value:s,label:STATUS[s].label}));
   const prOpts = Object.keys(PRIORIDADE).map(k=>({value:k,label:PRIORIDADE[k].label}));
 
-  // Empresa atualmente selecionada (a partir do clienteId salvo na demanda, se houver)
+  // Empresa de cada projeto (via projeto.clienteId -> cliente.empresa), para filtro cruzado
+  const empresaDoProjeto = {};
+  const clienteDoProjeto = {};
+  Store.projetos().forEach(p => {
+    const c = p.clienteId ? Store.cliente(p.clienteId) : null;
+    empresaDoProjeto[p.id] = c ? (c.empresa||'').trim() : '';
+    clienteDoProjeto[p.id] = p.clienteId || '';
+  });
+  // Empresa -> lista de projetos daquela empresa
+  const projetosPorEmpresa = {};
+  Store.projetos().forEach(p => {
+    const emp = empresaDoProjeto[p.id];
+    if (!emp) return;
+    (projetosPorEmpresa[emp] = projetosPorEmpresa[emp] || []).push({ id: p.id, label: p.nome });
+  });
+
+  // Empresa atualmente selecionada: prioriza a empresa do projeto já salvo (se houver);
+  // senão cai na empresa do contato (clienteId) salvo na demanda.
+  const projetoAtual = d.projetoId ? Store.projeto(d.projetoId) : null;
   const clienteAtual = d.clienteId ? Store.cliente(d.clienteId) : null;
-  const empresaAtual = clienteAtual ? (clienteAtual.empresa||'').trim() : '';
+  const empresaAtual = (projetoAtual ? empresaDoProjeto[projetoAtual.id] : '') || (clienteAtual ? (clienteAtual.empresa||'').trim() : '');
   const contatosDaEmpresa = empresaAtual ? (empresaMap[empresaAtual]||[]) : [];
   const solicOpts = contatosDaEmpresa.map(c => ({ value: c.id, label: c.contato || c.nome }));
+  // Projetos visíveis inicialmente: só os da empresa selecionada (se houver empresa selecionada)
+  const projOptsFiltrados = empresaAtual ? (projetosPorEmpresa[empresaAtual]||[]) : projOpts;
 
-  // Guarda o mapa empresa -> contatos no próprio DOM (via data attribute em JSON) para uso no onchange
+  // Guarda os mapas no próprio DOM (via data attributes em JSON) para uso no onchange
   const mapaJson = escapeHTML(JSON.stringify(
     Object.fromEntries(empresasUnicas.map(emp => [emp, empresaMap[emp].map(c => ({ id: c.id, label: c.contato || c.nome }))]))
   ));
+  const projetoEmpresaMapJson = escapeHTML(JSON.stringify(empresaDoProjeto));
+  const projetoClienteMapJson = escapeHTML(JSON.stringify(clienteDoProjeto));
+  const empresaProjetosMapJson = escapeHTML(JSON.stringify(projetosPorEmpresa));
+  const todosProjetosJson = escapeHTML(JSON.stringify(projOpts));
+
+  // "Criado por" (equipe): em edição usa o valor já salvo na demanda; em demanda nova,
+  // pré-seleciona o usuário logado (se ele tiver um registro correspondente em equipe).
+  const criadoPorId = d.criadoPorId || (!d.id ? (opts.defaultCriadoPorId || '') : '');
 
   return `
-  <form id="demandaForm" class="form-grid" data-empresa-map='${mapaJson}'>
+  <form id="demandaForm" class="form-grid" data-empresa-map='${mapaJson}' data-projeto-empresa-map='${projetoEmpresaMapJson}' data-projeto-cliente-map='${projetoClienteMapJson}' data-empresa-projetos-map='${empresaProjetosMapJson}' data-todos-projetos='${todosProjetosJson}'>
     <div class="field full"><label>Título *</label><input name="titulo" required value="${escapeHTML(d.titulo||'')}"/></div>
-    <div class="field"><label>Projeto</label>${UI.select('projetoId',[{value:'',label:'—'},...projOpts], d.projetoId||'')}</div>
+    <div class="field"><label>Projeto</label>${UI.select('projetoId',[{value:'',label:'—'},...projOptsFiltrados], d.projetoId||'')}</div>
     <div class="field"><label>Cliente (Empresa)</label>${UI.select('empresaSelecionada',[{value:'',label:'—'},...cliOpts], empresaAtual)}</div>
     <div class="field"><label>Solicitante (Contato)</label>${UI.select('clienteId',[{value:'',label:'—'},...solicOpts], d.clienteId||'')}</div>
-    <div class="field"><label>Responsável</label>${UI.select('responsavelId',[{value:'',label:'—'},...respOpts], d.responsavelId||'')}</div>
+    <div class="field"><label>Executante</label>${UI.select('responsavelId',[{value:'',label:'—'},...respOpts], d.responsavelId||'')}</div>
+    <div class="field"><label>Criado por</label>${UI.select('criadoPorId',[{value:'',label:'—'},...respOpts], criadoPorId)}</div>
+    <div class="field"><label>Equipe</label>${UI.select('equipeArea',[{value:'',label:'—'},...Object.keys(EQUIPE_AREA).map(k=>({value:k,label:EQUIPE_AREA[k].label}))], d.equipeArea||'')}</div>
     <div class="field"><label>Status</label>${UI.select('status',stOpts,d.status||'backlog')}</div>
     <div class="field"><label>Prioridade</label>${UI.select('prioridade',prOpts,d.prioridade||'normal')}</div>
     <div class="field"><label>Prazo</label><input type="date" name="prazo" value="${d.prazo?isoDay(d.prazo):''}"/></div>
