@@ -3,7 +3,8 @@
 const App = {
   view: 'dashboard',
   filters: {
-    demandas: { q:'', cliente:'', projeto:'', responsavel:'', equipe:'', status:'', prioridade:'', data:'' },
+    demandas: { id:'', q:'', cliente:'', projeto:'', responsavel:'', equipe:'', status:'', prioridade:'', data:'' },
+    ordensServico: { q:'', cliente:'', demanda:'', status:'', responsavel:'', dataIni:'', dataFim:'', modo:'lista' },
     projetos: { q:'', cliente:'', status:'', prioridade:'', responsavel:'' },
     clientes: { q:'' },
     timeline: { cliente:'' },
@@ -31,6 +32,7 @@ const App = {
 
   async init() {
     await Store.load();
+    OSStore.load();
     this.bindShell();
     this.applySidebarState();
     await this.loadCurrentUser();
@@ -125,6 +127,12 @@ const App = {
     this.filters.cliente360.cliente = empresa || '';
     this.cliente360Tab = tab;
     this.go('cliente360');
+  },
+
+  // Abre Demandas já filtradas por um projeto específico (usado a partir da lista de Projetos)
+  goProjetoDemandas(projetoId) {
+    Object.assign(this.filters.demandas, { id:'', q:'', cliente:'', projeto:projetoId, responsavel:'', equipe:'', status:'', prioridade:'', data:'' });
+    this.go('demandas');
   },
 
   render() {
@@ -343,8 +351,7 @@ const App = {
     // Barras por responsável
     const respCount = {};
     dems.forEach(d => {
-      const p = Store.pessoa(d.responsavelId);
-      const n = p?.nome || 'Sem executante';
+      const n = nomeResponsavel(d) || 'Sem executante';
       respCount[n] = (respCount[n]||0)+1;
     });
     const respEntries = Object.entries(respCount).sort((a,b)=>b[1]-a[1]).slice(0,8);
@@ -458,7 +465,7 @@ const App = {
         const dems = Store.demandas().filter(d=>d.clienteId===c.id).length;
         return `<tr>
           <td><strong class="link-like" data-a="open360" data-empresa="${escapeHTML(c.empresa)}" style="cursor:pointer">${escapeHTML(c.empresa)}</strong></td>
-          <td>${escapeHTML(c.nome)}<div style="color:var(--text-2);font-size:11px">${escapeHTML(c.telefone||'')}</div></td>
+          <td>${escapeHTML(c.nome)}<div style="color:var(--text-2);font-size:11px">${escapeHTML(maskPhone(c.telefone||''))}</div></td>
           <td>${escapeHTML(c.email||'')}</td>
           <td>${escapeHTML(c.cidade||'')}</td>
           <td><span class="pill">${projs}</span></td>
@@ -488,10 +495,12 @@ const App = {
       body: UI.clienteForm(c||{}),
       footer: `<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="saveCli"><i class="fa-solid fa-check"></i> Salvar</button>`,
       onOpen: (root, close) => {
+        attachPhoneMask(root.querySelector('#clienteTelefone'));
         root.querySelector('[data-close-modal]').onclick = close;
         root.querySelector('#saveCli').onclick = () => {
           const data = UI.readForm(root.querySelector('#clienteForm'));
           if (!data.nome) return UI.toast('Nome obrigatório','warn');
+          if (!data.empresa) return UI.toast('Empresa obrigatória','warn');
           Store.upsert('clientes', { id: c?.id, ...data, createdAt: c?.createdAt || new Date().toISOString() });
           close(); UI.toast('Cliente salvo','success'); this.render();
         };
@@ -528,6 +537,7 @@ const App = {
         <div class="toolbar" style="margin-bottom:0;">
           <i class="fa-solid fa-building" style="color:var(--text-2)"></i>
           <select id="clienteSelect" style="min-width:220px;font-weight:600;">${cliOpts}</select>
+          ${f.cliente ? `<button class="icon-btn" id="clienteClear" title="Limpar filtro"><i class="fa-solid fa-xmark"></i></button>` : ''}
         </div>
       </div>
       <div id="c360Body"></div>`;
@@ -537,6 +547,8 @@ const App = {
     const rerenderC360 = () => this.render_cliente360(root);
 
     $('#clienteSelect').onchange = e => { f.cliente = e.target.value; rerenderC360(); };
+    const clearBtn = $('#clienteClear');
+    if (clearBtn) clearBtn.onclick = () => { f.cliente = ''; rerenderC360(); };
 
     const body = $('#c360Body');
     if (!f.cliente) {
@@ -579,6 +591,10 @@ const App = {
 
     if (this.cliente360Tab === 'visao') {
       pane.innerHTML = `
+        <div class="page-header" style="margin-bottom:10px;">
+          <div></div>
+          <button class="btn btn-primary" id="btnCronograma"><i class="fa-solid fa-timeline"></i> Gerar Cronograma</button>
+        </div>
         <div class="cards-grid">
           <div class="kpi-card"><div class="kpi-label">Projetos</div><div class="kpi-value">${projetos.length}</div></div>
           <div class="kpi-card"><div class="kpi-label">Demandas abertas</div><div class="kpi-value">${abertas.length}</div></div>
@@ -591,7 +607,7 @@ const App = {
             ${clienteIds.map(id => Store.cliente(id)).filter(Boolean).map(c => `
               <div style="padding:8px 0;border-bottom:1px solid var(--border);">
                 <strong>${escapeHTML(c.nome||'—')}</strong>
-                <div style="font-size:12px;color:var(--text-2)">${escapeHTML(c.contato||'')} ${c.email?'· '+escapeHTML(c.email):''} ${c.telefone?'· '+escapeHTML(c.telefone):''}</div>
+                <div style="font-size:12px;color:var(--text-2)">${escapeHTML(c.contato||'')} ${c.email?'· '+escapeHTML(c.email):''} ${c.telefone?'· '+escapeHTML(maskPhone(c.telefone)):''}</div>
               </div>`).join('') || UI.emptyState('user','Sem contatos cadastrados.')}
           </div>
           <div class="table-wrap" style="padding:16px;">
@@ -604,6 +620,7 @@ const App = {
           </div>
         </div>`;
       pane.querySelectorAll('[data-open-dem]').forEach(el => el.onclick = () => this.openDemandaDrawer(el.dataset.openDem));
+      $('#btnCronograma').onclick = () => this.exportCronogramaCliente(f.cliente, projetos, demandas);
       return;
     }
 
@@ -654,8 +671,16 @@ const App = {
       // Reaproveita a tela de Demandas, mas com um filtro isolado (não mexe no
       // this.filters.demandas global), pra não "vazar" o cliente selecionado aqui
       // pra quando o usuário for na tela de Demandas normal pelo menu.
+      // O filtro isolado é mantido entre re-renders (this.cliente360Filters.demandas),
+      // senão qualquer mudança feita pelo usuário (projeto, status, etc.) seria
+      // descartada no próximo redraw, que reconstrói `f` a partir do zero.
+      if (!this.cliente360Filters) this.cliente360Filters = {};
+      if (!this.cliente360Filters.demandas) this.cliente360Filters.demandas = { id:'', q:'', cliente:'', projeto:'', responsavel:'', equipe:'', status:'', prioridade:'', data:'' };
+      if (this.cliente360Filters.demandas.cliente !== f.cliente) {
+        this.cliente360Filters.demandas = { id:'', q:'', cliente:f.cliente, projeto:'', responsavel:'', equipe:'', status:'', prioridade:'', data:'' };
+      }
       const backup = this.filters.demandas;
-      this.filters.demandas = { ...backup, cliente: f.cliente };
+      this.filters.demandas = this.cliente360Filters.demandas;
       pane.innerHTML = `<div id="c360DemPane"></div>`;
       this.render_demandas($('#c360DemPane'), rerenderC360);
       this.filters.demandas = backup;
@@ -665,6 +690,7 @@ const App = {
     if (this.cliente360Tab === 'kanban') {
       if (!this.cliente360Filters) this.cliente360Filters = {};
       if (!this.cliente360Filters.kanban) this.cliente360Filters.kanban = { q:'', cliente:f.cliente, projeto:'', responsavel:'', equipe:'', prioridade:'' };
+      this.cliente360Filters.kanban.cliente = f.cliente;
       const backup = this.filters.kanban;
       this.filters.kanban = this.cliente360Filters.kanban;
       pane.innerHTML = `<div id="c360KbPane"></div>`;
@@ -676,6 +702,7 @@ const App = {
     if (this.cliente360Tab === 'calendario') {
       if (!this.cliente360Filters) this.cliente360Filters = {};
       if (!this.cliente360Filters.calendario) this.cliente360Filters.calendario = { cliente:f.cliente, projeto:'', responsavel:'', prioridade:'' };
+      this.cliente360Filters.calendario.cliente = f.cliente;
       if (!this.cliente360CalDate) this.cliente360CalDate = new Date();
       const backupFilter = this.filters.calendario;
       const backupDate = this.calDate;
@@ -696,6 +723,383 @@ const App = {
       this.calDate = backupDate;
       return;
     }
+  },
+
+  /* ================== ORDENS DE SERVIÇO ================== */
+  readOSApontamentos(container) {
+    if (!container) return [];
+    return Array.from(container.querySelectorAll('[data-os-apontamento]')).map((card) => {
+      const out = {};
+      card.querySelectorAll('[data-key]').forEach(el => { out[el.dataset.key] = el.value; });
+      return out;
+    });
+  },
+
+  renderOSApontamentos(container, list) {
+    if (!container) return;
+    const rows = Array.isArray(list) && list.length ? list : [{}];
+    container.innerHTML = rows.map((a,i) => UI.osApontamentoCard(a, i)).join('');
+    container.querySelectorAll('.os-remove-apontamento').forEach(btn => {
+      btn.onclick = () => {
+        const atual = this.readOSApontamentos(container);
+        const index = Number(btn.closest('[data-os-apontamento]')?.dataset.osApontamento);
+        if (atual.length <= 1 || !Number.isInteger(index)) return;
+        atual.splice(index, 1);
+        this.renderOSApontamentos(container, atual);
+      };
+    });
+  },
+
+  osResumo(os) {
+    const apont = Array.isArray(os?.apontamentos) ? os.apontamentos : [];
+    const minutos = apont.reduce((total, a) => {
+      if (!a.horaInicial || !a.horaFinal) return total;
+      const [hi,mi] = a.horaInicial.split(':').map(Number);
+      const [hf,mf] = a.horaFinal.split(':').map(Number);
+      let d = (hf*60+mf) - (hi*60+mi) - Number(a.intervalo||0);
+      if (d < 0) d += 24*60;
+      return total + Math.max(0, d);
+    }, 0);
+    const previsto = Number(os?.tempoPrevisto||0);
+    const saldo = previsto - minutos;
+    return { apontamentos: apont.length, minutos, previsto, saldo, consumo: previsto > 0 ? (minutos/previsto)*100 : null };
+  },
+
+  osStatusLabel(s) {
+    return (typeof osStatusLabelMap !== 'undefined' && osStatusLabelMap[s])
+      ? osStatusLabelMap[s]
+      : (s || '<SEM DESCRICAO SLA>');
+  },
+
+  osFormatHours(mins) {
+    const n = Math.max(0, Number(mins)||0);
+    return `${Math.floor(n/60)}h ${String(n%60).padStart(2,'0')}min`;
+  },
+
+  osAgendaEntry(os) {
+    const apont = Array.isArray(os.apontamentos) ? os.apontamentos : [];
+    const d = Store.demanda(os.demandaId);
+    const cli = Store.cliente(os.clienteId || d?.clienteId);
+    const resp = os.responsavelId ? Store.pessoa(os.responsavelId) : null;
+    const fallbackExec = os.responsavelNome || resp?.nome || 'Sem executante';
+    const entries=[];
+    const addEntry=(a,idx)=>{
+      let date=a.dataExecucao||'', start=a.horaInicial||'', end=a.horaFinal||'';
+      if(a.agendamento){ const dt=new Date(a.agendamento); if(!isNaN(dt)){ date=date||isoDay(dt); start=start||dt.toTimeString().slice(0,5); } }
+      if(!date) return;
+      const sm=start?Number(start.slice(0,2))*60+Number(start.slice(3,5)):0;
+      let em=end?Number(end.slice(0,2))*60+Number(end.slice(3,5)):sm+60;
+      if(em<=sm) em=sm+60;
+      const ex=a.executanteId?Store.pessoa(a.executanteId):null;
+      entries.push({os,idx,date,start:start||'—',end:end||'—',startMin:sm,endMin:em,executanteId:a.executanteId||os.responsavelId||'',exec:a.executanteNome||ex?.nome||fallbackExec,cliente:cli?.empresa||'—',demanda:d?.titulo||'—'});
+    };
+    if(apont.length) apont.forEach(addEntry);
+    return entries;
+  },
+
+  osAllAgendaEntries(list) { return list.flatMap(os=>this.osAgendaEntry(os)); },
+
+  osConflictEntries(target, ignoreOsId='') {
+    if(!target?.responsavelId || target.responsavelId==='__novo' || !target.date || !target.start) return [];
+    const [h,m]=target.start.split(':').map(Number); const st=h*60+m;
+    let en=st+60;
+    if(target.end){ const [eh,em]=target.end.split(':').map(Number); en=eh*60+em; if(en<=st) en+=24*60; }
+    return this.osAllAgendaEntries(OSStore.all()).filter(e=>e.os.id!==ignoreOsId && e.executanteId===target.responsavelId && e.date===target.date && st < e.endMin-1 && en > e.startMin+1);
+  },
+
+  renderOSAgenda(root, entries, modo) {
+    const f=this.filters.ordensServico;
+    const base=f.dataIni?parseLocalDate(f.dataIni):today(); base.setHours(0,0,0,0);
+    const days=modo==='dia'?[base]:Array.from({length:7},(_,i)=>addDays(base,(1-(base.getDay()||7))+i));
+    const dayNames=['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+    const byDay={}; entries.forEach(e=>(byDay[e.date]??=[]).push(e));
+    root.innerHTML=`<div class="os-agenda-head"><div><strong>${modo==='dia'?fmtDate(days[0]):`${fmtDate(days[0])} — ${fmtDate(days[6])}`}</strong><span>${entries.length} atendimento(s) no período</span></div><div class="os-agenda-actions"><button class="btn btn-sm" id="osAgendaPrev"><i class="fa-solid fa-chevron-left"></i></button><button class="btn btn-sm" id="osAgendaToday">Hoje</button><button class="btn btn-sm" id="osAgendaNext"><i class="fa-solid fa-chevron-right"></i></button></div></div><div class="os-agenda-grid ${modo==='dia'?'single-day':''}">${days.map(day=>{const key=isoDay(day),list=(byDay[key]||[]).sort((a,b)=>a.startMin-b.startMin);return `<div class="os-agenda-day"><div class="os-agenda-day-head"><span>${dayNames[day.getDay()]}</span><strong>${day.getDate()}</strong><small>${fmtDate(day)}</small></div><div class="os-agenda-slots">${list.length?list.map(e=>`<button class="os-agenda-card" data-os-agenda-id="${e.os.id}"><span class="os-agenda-time">${escapeHTML(e.start)}${e.end!=='—'?` — ${escapeHTML(e.end)}`:''}</span><strong>OS-${Number(e.os.numero||0).toString().padStart(5,'0')}</strong><span>${escapeHTML(e.cliente)}</span><span>${escapeHTML(e.exec)}</span><small>${escapeHTML(e.demanda)}</small>${UI.osStatusPill(e.os.statusOs)}</button>`).join(''):`<div class="os-agenda-empty"><i class="fa-regular fa-calendar"></i><span>Sem atendimentos</span></div>`}</div></div>`;}).join('')}</div>`;
+    root.querySelectorAll('[data-os-agenda-id]').forEach(b=>b.onclick=()=>this.openOSDrawer(b.dataset.osAgendaId));
+    root.querySelector('#osAgendaPrev').onclick=()=>{f.dataIni=isoDay(addDays(base,modo==='dia'?-1:-7));f.dataFim=f.dataIni;this.render();};
+    root.querySelector('#osAgendaNext').onclick=()=>{f.dataIni=isoDay(addDays(base,modo==='dia'?1:7));f.dataFim=f.dataIni;this.render();};
+    root.querySelector('#osAgendaToday').onclick=()=>{f.dataIni=isoDay(today());f.dataFim=f.dataIni;this.render();};
+  },
+
+  render_ordensServico(root) {
+    const f=this.filters.ordensServico, all=OSStore.all();
+    const empresas=[...new Set(all.map(os=>Store.cliente(os.clienteId)?.empresa).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+    const demandas=Store.demandas().slice().sort((a,b)=>(a.titulo||'').localeCompare(b.titulo||'','pt-BR'));
+    const cliOpts=empresas.map(emp=>`<option value="${escapeHTML(emp)}" ${f.cliente===emp?'selected':''}>${escapeHTML(emp)}</option>`).join('');
+    const demOpts=demandas.map(d=>`<option value="${d.id}" ${f.demanda===d.id?'selected':''}>#${Store.demandaSeq(d.id)} — ${escapeHTML(d.titulo)}</option>`).join('');
+    const stOpts=OS_STATUS_OPTIONS.map(o=>`<option value="${o.value}" ${f.status===o.value?'selected':''}>${escapeHTML(o.label)}</option>`).join('');
+    const respOpts=Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR')).map(p=>`<option value="${escapeHTML(p.id)}" ${f.responsavel===p.id?'selected':''}>${escapeHTML(p.nome)}</option>`).join('');
+    root.innerHTML=`<div class="page-header"><div><h1 class="page-title">Ordens de Serviço</h1><div class="page-subtitle">Gestão operacional, agenda, horas e acompanhamento das OS.</div></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="btnOSRefresh"><i class="fa-solid fa-rotate"></i> Atualizar</button><button class="btn btn-primary" id="btnNovaOS"><i class="fa-solid fa-plus"></i> Nova OS</button></div></div>
+    <div class="kpi-grid os-kpi-grid"><div class="kpi"><div class="kpi-head"><div class="kpi-label">Total</div><div class="kpi-icon" style="background:var(--primary)"><i class="fa-solid fa-screwdriver-wrench"></i></div></div><div class="kpi-value" id="osKpiTotal">0</div><div class="kpi-hint">OS cadastradas</div></div><div class="kpi"><div class="kpi-head"><div class="kpi-label">Em andamento</div><div class="kpi-icon" style="background:var(--info)"><i class="fa-solid fa-spinner"></i></div></div><div class="kpi-value" id="osKpiAndamento">0</div><div class="kpi-hint">Atendimento em execução</div></div><div class="kpi"><div class="kpi-head"><div class="kpi-label">Agendadas</div><div class="kpi-icon" style="background:var(--warning)"><i class="fa-solid fa-calendar-check"></i></div></div><div class="kpi-value" id="osKpiAgendadas">0</div><div class="kpi-hint">Atendimentos com horário</div></div><div class="kpi"><div class="kpi-head"><div class="kpi-label">Sem apontamento</div><div class="kpi-icon" style="background:var(--danger)"><i class="fa-regular fa-clock"></i></div></div><div class="kpi-value" id="osKpiSemApontamento">0</div><div class="kpi-hint">OS abertas sem horas</div></div><div class="kpi"><div class="kpi-head"><div class="kpi-label">Horas realizadas</div><div class="kpi-icon" style="background:var(--success)"><i class="fa-solid fa-stopwatch"></i></div></div><div class="kpi-value" id="osKpiHoras">0h</div><div class="kpi-hint">Tempo apontado</div></div><div class="kpi"><div class="kpi-head"><div class="kpi-label">Concluídas</div><div class="kpi-icon" style="background:var(--success)"><i class="fa-solid fa-check"></i></div></div><div class="kpi-value" id="osKpiConcluidas">0</div><div class="kpi-hint">OS encerradas</div></div></div>
+    <div class="os-alerts" id="osAlerts"></div>
+    <div class="toolbar os-toolbar"><input id="osFq" placeholder="Pesquisar OS, demanda, cliente, executante..." value="${escapeHTML(f.q)}" style="min-width:240px;flex:1"/><select id="osFcli"><option value="">Todos clientes</option>${cliOpts}</select><select id="osFdem"><option value="">Todas demandas</option>${demOpts}</select><select id="osFresp"><option value="">Todos executantes</option>${respOpts}</select><select id="osFstatus"><option value="">Todos status</option>${stOpts}</select><label class="os-date-filter"><span>De</span><input type="date" id="osFini" value="${escapeHTML(f.dataIni||'')}"></label><label class="os-date-filter"><span>Até</span><input type="date" id="osFfim" value="${escapeHTML(f.dataFim||'')}"></label><div class="os-view-switch"><button class="btn btn-sm ${f.modo==='lista'?'btn-primary':''}" id="osModoLista"><i class="fa-solid fa-list"></i> Lista</button><button class="btn btn-sm ${f.modo==='semana'?'btn-primary':''}" id="osModoSemana"><i class="fa-solid fa-calendar-week"></i> Semana</button><button class="btn btn-sm ${f.modo==='dia'?'btn-primary':''}" id="osModoDia"><i class="fa-solid fa-calendar-day"></i> Dia</button></div></div><div id="osMainContent"></div>`;
+
+    const isMatch=os=>{const q=(f.q||'').trim().toLowerCase(),d=Store.demanda(os.demandaId),cli=Store.cliente(os.clienteId),resp=os.responsavelId?Store.pessoa(os.responsavelId):null,hay=[os.numero,d?.titulo,cli?.empresa,os.responsavelNome,resp?.nome,this.osStatusLabel(os.statusOs),os.contrato,os.ambiente,os.origem,os.centroResultado].map(v=>String(v||'').toLowerCase()).join(' ');if(q&&!hay.includes(q))return false;if(f.cliente&&(cli?.empresa||'')!==f.cliente)return false;if(f.demanda&&os.demandaId!==f.demanda)return false;if(f.responsavel&&os.responsavelId!==f.responsavel)return false;if(f.status&&os.statusOs!==f.status)return false;if(f.dataIni||f.dataFim){const ds=this.osAgendaEntry(os).map(e=>e.date).filter(Boolean);const vals=ds.length?ds:(os.dataLimite?[isoDay(os.dataLimite)]:[]);if(vals.length&&!vals.some(dt=>(!f.dataIni||dt>=f.dataIni)&&(!f.dataFim||dt<=f.dataFim)))return false;}return true;};
+    const filtered=all.filter(isMatch).sort((a,b)=>Number(b.numero||0)-Number(a.numero||0));
+    const totals=all.reduce((acc,os)=>{const r=this.osResumo(os),entries=this.osAgendaEntry(os);acc.total++;acc.andamento+=os.statusOs==='em_andamento'?1:0;acc.agendadas+=entries.length;acc.semApontamento+=!r.minutos&&!['concluido','cancelado'].includes(os.statusOs)?1:0;acc.minutos+=r.minutos;acc.concluidas+=['concluido','solucionado'].includes(os.statusOs)?1:0;return acc;},{total:0,andamento:0,agendadas:0,semApontamento:0,minutos:0,concluidas:0});
+    $('#osKpiTotal').textContent=totals.total;$('#osKpiAndamento').textContent=totals.andamento;$('#osKpiAgendadas').textContent=totals.agendadas;$('#osKpiSemApontamento').textContent=totals.semApontamento;$('#osKpiHoras').textContent=this.osFormatHours(totals.minutos).replace('min','').trim();$('#osKpiConcluidas').textContent=totals.concluidas;
+    const overdue=all.filter(os=>os.dataLimite&&isoDay(os.dataLimite)<isoDay(today())&&!['concluido','cancelado'].includes(os.statusOs)); const noLogs=all.filter(os=>!this.osResumo(os).minutos&&!['concluido','cancelado'].includes(os.statusOs)); const entries=this.osAllAgendaEntries(all); const conflicts=[]; entries.forEach(e=>entries.forEach(x=>{if(x===e||!e.os.responsavelId||e.os.responsavelId!==x.os.responsavelId||e.date!==x.date)return;if(e.startMin<x.endMin-1&&e.endMin>x.startMin+1&&!conflicts.some(c=>c.a===e&&c.b===x))conflicts.push({a:e,b:x});}));
+    const alerts=[];if(overdue.length)alerts.push(`<div class="os-alert danger"><i class="fa-solid fa-triangle-exclamation"></i><div><strong>${overdue.length} OS em atraso</strong><span>Data limite vencida.</span></div><button class="btn btn-sm" data-alert="overdue">Ver</button></div>`);if(noLogs.length)alerts.push(`<div class="os-alert warn"><i class="fa-regular fa-clock"></i><div><strong>${noLogs.length} OS sem apontamento</strong><span>OS abertas sem horas realizadas.</span></div><button class="btn btn-sm" data-alert="nolog">Ver</button></div>`);if(conflicts.length)alerts.push(`<div class="os-alert danger"><i class="fa-solid fa-calendar-xmark"></i><div><strong>${conflicts.length} conflito(s) de agenda</strong><span>Mesmo executante em horários sobrepostos.</span></div><button class="btn btn-sm" data-alert="conflict">Abrir agenda</button></div>`);$('#osAlerts').innerHTML=alerts.join('');
+
+    const main=$('#osMainContent');
+    if(f.modo!=='lista'){const entriesFiltered=this.osAllAgendaEntries(filtered);this.renderOSAgenda(main,entriesFiltered,f.modo);}
+    else {main.innerHTML=`<div class="table-wrap"><table><thead><tr><th>OS</th><th>Demanda</th><th>Cliente</th><th>Executante</th><th>Apont.</th><th>Status</th><th>Data limite</th><th>Agenda</th><th>Sankhya</th><th style="width:126px"></th></tr></thead><tbody id="osTbody"></tbody></table></div>`;const tb=$('#osTbody');if(!filtered.length)tb.innerHTML=`<tr><td colspan="10">${UI.emptyState('screwdriver-wrench','Nenhuma OS encontrada.')}</td></tr>`;else tb.innerHTML=filtered.map(os=>{const d=Store.demanda(os.demandaId),cli=Store.cliente(os.clienteId),resp=os.responsavelId?Store.pessoa(os.responsavelId):null,exec=os.responsavelNome||resp?.nome||'—',r=this.osResumo(os),ag=this.osAgendaEntry(os),sk=os.sankhya?.status==='enviado'?'<span class="pill">Enviada</span>':'<span class="pill">Pendente</span>';return `<tr><td><strong class="os-table-id">OS-${Number(os.numero||0).toString().padStart(5,'0')}</strong></td><td><strong style="cursor:pointer" data-a="open" data-id="${os.id}">${escapeHTML(d?.titulo||'Demanda removida')}</strong><div class="os-table-muted">#${Store.demandaSeq(os.demandaId)||'—'}</div></td><td>${escapeHTML(cli?.empresa||'—')}</td><td>${escapeHTML(exec)}</td><td><span class="pill">${r.apontamentos}</span>${r.minutos?`<div class="os-table-muted">${this.osFormatHours(r.minutos)}</div>`:''}</td><td>${UI.osStatusPill(os.statusOs)}</td><td>${os.dataLimite?fmtDate(os.dataLimite):'—'}${os.horaLimite?`<div class="os-table-muted">${escapeHTML(os.horaLimite)}</div>`:''}</td><td>${ag.length?`<span class="pill">${ag.length} ag.</span>`:'—'}</td><td>${sk}</td><td><div class="row-actions"><button data-a="open" data-id="${os.id}" title="Detalhes"><i class="fa-solid fa-eye"></i></button><button data-a="edit" data-id="${os.id}" title="Editar"><i class="fa-solid fa-pen"></i></button><button class="del" data-a="del" data-id="${os.id}" title="Excluir"><i class="fa-solid fa-trash"></i></button></div></td></tr>`;}).join('');tb.querySelectorAll('[data-a="open"]').forEach(b=>b.onclick=()=>this.openOSDrawer(b.dataset.id));tb.querySelectorAll('[data-a="edit"]').forEach(b=>b.onclick=()=>this.openOSModal(OSStore.get(b.dataset.id)));tb.querySelectorAll('[data-a="del"]').forEach(b=>b.onclick=()=>this.delOS(b.dataset.id));}
+    $('#osFq').oninput=debounce(e=>{f.q=e.target.value;this.render();},180);$('#osFcli').onchange=e=>{f.cliente=e.target.value;this.render();};$('#osFdem').onchange=e=>{f.demanda=e.target.value;this.render();};$('#osFresp').onchange=e=>{f.responsavel=e.target.value;this.render();};$('#osFstatus').onchange=e=>{f.status=e.target.value;this.render();};$('#osFini').onchange=e=>{f.dataIni=e.target.value;if(f.dataFim&&f.dataFim<f.dataIni)f.dataFim=f.dataIni;this.render();};$('#osFfim').onchange=e=>{f.dataFim=e.target.value;this.render();};$('#osModoLista').onclick=()=>{f.modo='lista';this.render();};$('#osModoSemana').onclick=()=>{f.modo='semana';if(!f.dataIni)f.dataIni=isoDay(today());if(!f.dataFim)f.dataFim=f.dataIni;this.render();};$('#osModoDia').onclick=()=>{f.modo='dia';if(!f.dataIni)f.dataIni=isoDay(today());if(!f.dataFim)f.dataFim=f.dataIni;this.render();};$('#btnNovaOS').onclick=()=>this.openOSModal();$('#btnOSRefresh').onclick=()=>this.render();
+    root.querySelectorAll('[data-alert]').forEach(btn=>btn.onclick=()=>{const t=btn.dataset.alert;if(t==='overdue'){UI.modal({title:`OS em atraso (${overdue.length})`,size:'lg',body:`<div class="dashboard-modal-list">${overdue.map(os=>{const d=Store.demanda(os.demandaId),c=Store.cliente(os.clienteId);return `<div class="dashboard-modal-item"><div><strong>OS-${Number(os.numero||0).toString().padStart(5,'0')}</strong><span>${escapeHTML(d?.titulo||'Demanda')} · ${escapeHTML(c?.empresa||'Sem cliente')} · limite ${fmtDate(os.dataLimite)}</span></div>${UI.osStatusPill(os.statusOs)}</div>`;}).join('')}</div>`,footer:'<button class="btn" data-close-modal>Fechar</button>',onOpen:(r,c)=>r.querySelector('[data-close-modal]').onclick=c});}else if(t==='nolog'){UI.modal({title:`OS sem apontamento (${noLogs.length})`,size:'lg',body:`<div class="dashboard-modal-list">${noLogs.map(os=>{const d=Store.demanda(os.demandaId),c=Store.cliente(os.clienteId);return `<div class="dashboard-modal-item"><div><strong>OS-${Number(os.numero||0).toString().padStart(5,'0')}</strong><span>${escapeHTML(d?.titulo||'Demanda')} · ${escapeHTML(c?.empresa||'Sem cliente')}</span></div>${UI.osStatusPill(os.statusOs)}</div>`;}).join('')}</div>`,footer:'<button class="btn" data-close-modal>Fechar</button>',onOpen:(r,c)=>r.querySelector('[data-close-modal]').onclick=c});}else{f.modo='semana';f.dataIni=isoDay(today());f.dataFim=f.dataIni;this.render();UI.toast('Revise os horários sobrepostos na agenda. Novos conflitos serão bloqueados ao salvar.','warn',5500);}});
+  },
+
+  openOSModal(os=null, demandaPreSelecionada='') {
+    const selectedDemanda = demandaPreSelecionada || os?.demandaId || '';
+    UI.modal({
+      title: os ? `Editar OS-${Number(os.numero||0).toString().padStart(5,'0')}` : 'Nova Ordem de Serviço',
+      size:'lg',
+      body: UI.osForm(os||{}, { demandaId:selectedDemanda }),
+      footer: `<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="saveOS"><i class="fa-solid fa-check"></i> ${os?'Salvar alterações':'Salvar OS'}</button>`,
+      onOpen: (root, close) => {
+        const form = root.querySelector('#osForm');
+        const demandaSelect = form.querySelector('[name="demandaId"]');
+        const respSelect = form.querySelector('[name="responsavelId"]');
+        const respLivre = form.querySelector('#osResponsavelLivre');
+        const clienteInput = form.querySelector('#osCliente');
+        const solicitanteInput = form.querySelector('#osSolicitante');
+        const apontContainer = form.querySelector('#osApontamentos');
+
+        const fmtMin = (mins) => `${Math.floor(mins/60)}h ${mins%60}min`;
+        const calcMinutes = (a) => {
+          if (!a?.horaInicial || !a?.horaFinal) return 0;
+          const [hi,mi] = a.horaInicial.split(':').map(Number);
+          const [hf,mf] = a.horaFinal.split(':').map(Number);
+          let d = (hf*60+mf) - (hi*60+mi) - Number(a.intervalo||0);
+          if (d < 0) d += 24*60;
+          return Math.max(0,d);
+        };
+        const atualizarMetricas = () => {
+          const dados = this.readOSApontamentos(apontContainer);
+          const mins = dados.reduce((sum,a)=>sum+calcMinutes(a),0);
+          const previsto = Number(form.querySelector('[name="tempoPrevisto"]')?.value || 0);
+          const pct = previsto > 0 ? Math.round((mins/previsto)*100) : null;
+          const setText = (sel,text) => { const el=root.querySelector(sel); if(el) el.textContent=text; };
+          setText('#osMetricCount', String(dados.length));
+          setText('#osMetricRealizado', fmtMin(mins));
+          setText('#osMetricPrevisto', previsto ? fmtMin(previsto) : '—');
+          setText('#osMetricConsumo', pct == null ? '—' : `${pct}%`);
+          const wrap=root.querySelector('#osProgressWrap'), bar=root.querySelector('#osProgressBar');
+          if(wrap) wrap.style.display = previsto ? '' : 'none';
+          if(bar) bar.style.width = `${Math.min(pct||0,100)}%`;
+        };
+        const atualizarTab = (tab) => {
+          root.querySelectorAll('[data-os-tab]').forEach(b => b.classList.toggle('active', b.dataset.osTab===tab));
+          root.querySelectorAll('[data-os-panel]').forEach(p => p.classList.toggle('active', p.dataset.osPanel===tab));
+        };
+        root.querySelectorAll('[data-os-tab]').forEach(btn => btn.onclick = () => atualizarTab(btn.dataset.osTab));
+        const statusSelect = form.querySelector('[name="statusOs"]');
+        statusSelect.addEventListener('change', () => {
+          const holder = root.querySelector('#osModalSummaryStatus');
+          if (holder) holder.innerHTML = UI.osStatusPill(statusSelect.value || 'novo');
+        });
+
+        const renderApontamentos = (list) => {
+          this.renderOSApontamentos(apontContainer, list);
+          atualizarMetricas();
+        };
+        renderApontamentos(os?.apontamentos?.length ? os.apontamentos : [{}]);
+
+        const atualizarContexto = () => {
+          const d = Store.demanda(demandaSelect.value);
+          const cli = d?.clienteId ? Store.cliente(d.clienteId) : null;
+          clienteInput.value = cli?.empresa || '';
+          solicitanteInput.value = d?.solicitanteNome || cli?.contato || cli?.nome || '';
+          const title = root.querySelector('#osModalSummaryTitle');
+          const context = root.querySelector('#osModalSummaryContext');
+          if(title) title.textContent = d?.titulo || 'Vincule uma demanda';
+          if(context) context.textContent = `${cli?.empresa || 'Cliente será preenchido pela demanda'} · ${d?.solicitanteNome || cli?.contato || cli?.nome || 'Solicitante será preenchido pela demanda'}`;
+          if (d && !os?.id) {
+            respSelect.value = d.responsavelId || '';
+          }
+          if (respSelect.value !== '__novo') respLivre.style.display = 'none';
+        };
+        demandaSelect.onchange = () => {
+          atualizarContexto();
+          // Ao trocar a demanda de uma nova OS, herda o executante e volta ao estado inicial do registro.
+        };
+        respSelect.onchange = () => {
+          respLivre.style.display = respSelect.value === '__novo' ? '' : 'none';
+          if (respSelect.value === '__novo') respLivre.focus();
+        };
+        form.querySelector('[name="tempoPrevisto"]').addEventListener('input', atualizarMetricas);
+        apontContainer.addEventListener('input', atualizarMetricas);
+        apontContainer.addEventListener('change', atualizarMetricas);
+        atualizarContexto();
+
+        form.querySelector('#osAddApontamento').onclick = () => {
+          const atual = this.readOSApontamentos(apontContainer);
+          atual.push({ executanteId: respSelect.value !== '__novo' ? respSelect.value : '' });
+          renderApontamentos(atual);
+          atualizarTab('apontamentos');
+        };
+
+        apontContainer.addEventListener('click', (e) => {
+          const actionBtn = e.target.closest('[data-action]');
+          if (actionBtn) {
+            const card = actionBtn.closest('[data-os-apontamento]');
+            if (!card) return;
+            const atual = this.readOSApontamentos(apontContainer);
+            const index = Number(card.dataset.osApontamento);
+            const a = atual[index] || {};
+            if (actionBtn.dataset.action === 'start') {
+              const now = new Date();
+              a.dataExecucao = isoDay(now);
+              a.horaInicial = now.toTimeString().slice(0,5);
+              a.status = 'em_andamento';
+              if (!a.executanteId && respSelect.value !== '__novo') a.executanteId = respSelect.value;
+            } else {
+              const now = new Date();
+              a.dataExecucao = a.dataExecucao || isoDay(now);
+              a.horaFinal = now.toTimeString().slice(0,5);
+            }
+            renderApontamentos(atual);
+            return;
+          }
+        });
+
+        root.querySelector('[data-close-modal]').onclick = close;
+        root.querySelector('#saveOS').onclick = () => {
+          const d = Store.demanda(demandaSelect.value);
+          if (!d) return UI.toast('Selecione uma demanda válida para a OS','warn');
+          const data = UI.readForm(form);
+          const apontamentos = this.readOSApontamentos(apontContainer);
+          if (!apontamentos.length) return UI.toast('Adicione pelo menos um apontamento','warn');
+          if (apontamentos.some(a => !String(a.servico||'').trim())) return UI.toast('Informe o serviço em todos os apontamentos','warn');
+          if (apontamentos.some(a => a.horaFinal && !a.horaInicial)) return UI.toast('Todo horário final precisa de um horário inicial','warn');
+
+          const agendaResponsavel = data.responsavelId && data.responsavelId !== '__novo' ? data.responsavelId : '';
+          for (let i=0; i<apontamentos.length; i++) {
+            const a = apontamentos[i];
+            const respId = a.executanteId || agendaResponsavel;
+            let date = a.dataExecucao || '';
+            let start = a.horaInicial || '';
+            let end = a.horaFinal || '';
+            if (a.agendamento) {
+              const dt = new Date(a.agendamento);
+              if (!isNaN(dt)) { date = date || isoDay(dt); start = start || dt.toTimeString().slice(0,5); }
+            }
+            if (!respId || !date || !start) continue;
+            const conflitos = this.osConflictEntries({responsavelId:respId, date, start, end}, os?.id || '');
+            if (conflitos.length) {
+              const c = conflitos[0];
+              return UI.toast(`Conflito de agenda: ${c.exec} já possui OS-${Number(c.os.numero||0).toString().padStart(5,'0')} em ${fmtDate(c.date)} às ${c.start}. Ajuste o horário antes de salvar.`, 'warn', 6500);
+            }
+          }
+
+          const cli = d.clienteId ? Store.cliente(d.clienteId) : null;
+          const respPessoa = data.responsavelId && data.responsavelId !== '__novo' ? Store.pessoa(data.responsavelId) : null;
+          const respNome = data.responsavelId === '__novo' ? String(data.responsavelNomeLivre||'').trim() : (respPessoa?.nome || '');
+          const normalizados = apontamentos.map(a => ({
+            ...a,
+            intervalo: Number(a.intervalo||0),
+            valor: a.valor === '' ? null : Number(a.valor||0),
+            executanteNome: a.executanteId ? (Store.pessoa(a.executanteId)?.nome||'') : '',
+          }));
+          const saved = OSStore.upsert({
+            ...os,
+            id: os?.id,
+            numero: os?.numero || OSStore.nextNumber(),
+            demandaId: d.id,
+            clienteId: d.clienteId || '',
+            solicitanteNome: d.solicitanteNome || cli?.contato || cli?.nome || '',
+            responsavelId: data.responsavelId === '__novo' ? '' : (data.responsavelId||''),
+            responsavelNome: respNome || nomeResponsavel(d),
+            statusOs: data.statusOs || 'novo',
+            origem: data.origem || '',
+            contrato: data.contrato || '',
+            ambiente: data.ambiente || '',
+            centroResultado: data.centroResultado || '',
+            tempoPrevisto: data.tempoPrevisto === '' ? null : Number(data.tempoPrevisto),
+            dataLimite: data.dataLimite || '',
+            horaLimite: data.horaLimite || '',
+            osRelacionada: data.osRelacionada || '',
+            observacoes: data.observacoes || '',
+            apontamentos: normalizados,
+            criadoEm: os?.criadoEm || new Date().toISOString(),
+            atualizadoEm: new Date().toISOString(),
+            sankhya: os?.sankhya || { status:'pendente' }
+          });
+          close();
+          UI.toast(`OS-${Number(saved.numero).toString().padStart(5,'0')} ${os ? 'atualizada' : 'salva'} no FlowDesk`,'success');
+          this.render();
+        };
+      }
+    });
+  },
+
+  openOSDrawer(id) {
+    const os = OSStore.get(id); if (!os) return;
+    const d = Store.demanda(os.demandaId);
+    const cli = Store.cliente(os.clienteId || d?.clienteId);
+    const resp = os.responsavelId ? Store.pessoa(os.responsavelId) : null;
+    const execNome = os.responsavelNome || resp?.nome || '—';
+    const resumo = this.osResumo(os);
+    const apontamentos = (os.apontamentos||[]).map((a,i) => {
+      const exec = a.executanteId ? Store.pessoa(a.executanteId) : null;
+      return `<tr>
+        <td><strong>${i+1}</strong></td><td><strong>${escapeHTML(a.servico||'—')}</strong><div class="os-table-muted">${escapeHTML(a.produto||'Sem produto')}</div></td>
+        <td>${escapeHTML(a.executanteNome || exec?.nome || '—')}</td><td>${a.dataExecucao?fmtDate(a.dataExecucao):'—'}</td>
+        <td>${escapeHTML(a.horaInicial||'—')} — ${escapeHTML(a.horaFinal||'—')}</td>
+        <td>${escapeHTML(a.classificacao||'—')}</td><td>${escapeHTML(a.motivo||'—')}</td>
+        <td>${a.valor != null && a.valor !== '' ? Number(a.valor).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}) : '—'}</td>
+      </tr>`;
+    }).join('');
+
+    UI.drawer({
+      title:`OS-${Number(os.numero||0).toString().padStart(5,'0')}`,
+      body:`
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">${UI.osStatusPill(os.statusOs)} <span class="pill">${resumo.apontamentos} apontamento(s)</span></div>
+        <div class="os-summary">
+          <div class="os-summary-card"><div class="label">Demanda</div><div class="value">#${Store.demandaSeq(os.demandaId)||'—'}</div></div>
+          <div class="os-summary-card"><div class="label">Previsto</div><div class="value">${resumo.previsto ? `${Math.floor(resumo.previsto/60)}h ${resumo.previsto%60}min` : '—'}</div></div>
+          <div class="os-summary-card"><div class="label">Realizado</div><div class="value">${Math.floor(resumo.minutos/60)}h ${resumo.minutos%60}min</div></div>
+          <div class="os-summary-card"><div class="label">Saldo</div><div class="value">${resumo.previsto ? `${resumo.saldo < 0 ? '-' : ''}${Math.floor(Math.abs(resumo.saldo)/60)}h ${Math.abs(resumo.saldo)%60}min` : '—'}</div></div>
+        </div>
+        <div class="os-context-grid">
+          <div class="os-context-card"><div class="os-context-label">Cliente</div><div class="os-context-value">${escapeHTML(cli?.empresa||'—')}</div></div>
+          <div class="os-context-card"><div class="os-context-label">Executante</div><div class="os-context-value">${escapeHTML(execNome)}</div></div>
+          <div class="os-context-card"><div class="os-context-label">Consumo</div><div class="os-context-value">${resumo.consumo == null ? '—' : `${resumo.consumo.toFixed(0)}%`}</div></div>
+        </div>
+        <div class="os-integration-banner"><i class="fa-solid fa-plug-circle-xmark"></i><div><strong>Sankhya: ${os.sankhya?.status==='enviado'?'enviada':'não enviada'}</strong><div>${os.sankhya?.status==='enviado' ? `Enviada em ${new Date(os.sankhya.data).toLocaleString('pt-BR')}` : 'A integração será conectada depois que o backend/token estiver pronto.'}</div></div></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+          <div><b>Demanda:</b> ${escapeHTML(d?.titulo||'Demanda removida')}</div>
+          <div><b>Solicitante:</b> ${escapeHTML(os.solicitanteNome||d?.solicitanteNome||'—')}</div>
+          <div><b>Contrato:</b> ${escapeHTML(os.contrato||'—')}</div>
+          <div><b>Ambiente:</b> ${escapeHTML(os.ambiente||'—')}</div>
+          <div><b>Origem:</b> ${escapeHTML(os.origem||'—')}</div>
+          <div><b>Centro de resultado:</b> ${escapeHTML(os.centroResultado||'—')}</div>
+          <div><b>Tempo previsto:</b> ${os.tempoPrevisto != null && os.tempoPrevisto !== '' ? `${escapeHTML(os.tempoPrevisto)} min` : '—'}</div>
+          <div><b>Data limite:</b> ${os.dataLimite?fmtDate(os.dataLimite):'—'}${os.horaLimite?` ${escapeHTML(os.horaLimite)}`:''}</div>
+          <div><b>OS relacionada:</b> ${escapeHTML(os.osRelacionada||'—')}</div>
+          <div><b>Criada em:</b> ${os.criadoEm?new Date(os.criadoEm).toLocaleString('pt-BR'):'—'}</div>
+        </div>
+        ${os.observacoes ? `<div class="section-title">Observações</div><div class="comment">${escapeHTML(os.observacoes)}</div>` : ''}
+        <div class="section-title">Apontamentos</div>
+        <div class="table-wrap"><table class="os-apont-table"><thead><tr><th>#</th><th>Serviço / Produto</th><th>Executante</th><th>Data</th><th>Horário</th><th>Classificação</th><th>Motivo</th><th>Valor</th></tr></thead><tbody>${apontamentos || '<tr><td colspan="8">Nenhum apontamento.</td></tr>'}</tbody></table></div>
+        <div class="os-detail-actions">
+          <button class="btn btn-primary" id="btnEditarOS"><i class="fa-solid fa-pen"></i> Editar</button>
+          <button class="btn" id="btnEnviarSankhya"><i class="fa-solid fa-cloud-arrow-up"></i> Enviar ao Sankhya</button>
+          <button class="btn btn-danger" id="btnExcluirOS"><i class="fa-solid fa-trash"></i> Excluir</button>
+        </div>`,
+      onOpen: (root, close) => {
+        root.querySelector('#btnEditarOS').onclick = () => { close(); this.openOSModal(os); };
+        root.querySelector('#btnEnviarSankhya').onclick = () => UI.toast('Integração com o Sankhya ainda não está conectada. A OS continua salva no FlowDesk.','info',5000);
+        root.querySelector('#btnExcluirOS').onclick = () => { close(); this.delOS(os.id); };
+      }
+    });
+  },
+
+  delOS(id) {
+    const os = OSStore.get(id); if (!os) return;
+    UI.confirm('Excluir OS', `OS-${Number(os.numero||0).toString().padStart(5,'0')} e todos os seus apontamentos serão removidos. Continuar?`, () => {
+      OSStore.remove(id);
+      UI.toast('OS excluída do FlowDesk','success');
+      this.render();
+    });
   },
 
   /* ================== PROJETOS ================== */
@@ -766,7 +1170,7 @@ const App = {
       tb.innerHTML = list.map(p => {
         const c = Store.cliente(p.clienteId); const r = Store.pessoa(p.responsavelId);
         const dems = Store.demandas().filter(d=>d.projetoId===p.id).length;
-        return `<tr>
+        return `<tr class="row-clickable" data-a="open" data-id="${p.id}" title="Ver demandas deste projeto">
           <td><strong>${escapeHTML(p.nome)}</strong></td>
           <td>${escapeHTML(c?.empresa||'—')}</td>
           <td>${escapeHTML(r?.nome||'—')}</td>
@@ -774,15 +1178,21 @@ const App = {
           <td>${fmtDate(p.prazo)}</td>
           <td>${UI.statusPill(p.status)}</td>
           <td>${UI.prioPill(p.prioridade)}</td>
-          <td><span class="pill">${dems}</span></td>
+          <td><span class="pill pill-link" data-a="open" data-id="${p.id}">${dems}</span></td>
           <td><div class="row-actions">
+            <button data-a="docs" data-id="${p.id}" title="Baixar documentos das demandas"><i class="fa-solid fa-file-zipper"></i></button>
             <button data-a="edit" data-id="${p.id}"><i class="fa-solid fa-pen"></i></button>
             <button class="del" data-a="del" data-id="${p.id}"><i class="fa-solid fa-trash"></i></button>
           </div></td>
         </tr>`;
       }).join('');
-      tb.querySelectorAll('[data-a="edit"]').forEach(b => b.onclick = () => this.openProjetoModal(Store.projeto(b.dataset.id)));
-      tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = () => this.delProjeto(b.dataset.id));
+      tb.querySelectorAll('tr[data-a="open"]').forEach(tr => tr.onclick = (e) => {
+        if (e.target.closest('[data-a="edit"], [data-a="del"], [data-a="docs"]')) return;
+        this.goProjetoDemandas(tr.dataset.id);
+      });
+      tb.querySelectorAll('[data-a="edit"]').forEach(b => b.onclick = (e) => { e.stopPropagation(); this.openProjetoModal(Store.projeto(b.dataset.id)); });
+      tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = (e) => { e.stopPropagation(); this.delProjeto(b.dataset.id); });
+      tb.querySelectorAll('[data-a="docs"]').forEach(b => b.onclick = (e) => { e.stopPropagation(); this.baixarDocumentosProjeto(b.dataset.id); });
     };
     $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; draw(); }, 150));
     $('#fcli').onchange = e => { f.cliente = e.target.value; draw(); };
@@ -817,6 +1227,32 @@ const App = {
       Store.remove('projetos', id); Store.save();
       UI.toast('Projeto excluído','success'); this.render();
     });
+  },
+  // Baixa o zip com todos os documentos das demandas do projeto. Faz um fetch
+  // primeiro (em vez de um <a href> direto) porque o endpoint pode responder
+  // 404 em JSON quando não há documentos, e um <a> baixaria esse JSON como
+  // se fosse o arquivo.
+  async baixarDocumentosProjeto(projetoId) {
+    try {
+      const res = await fetch(Documentos.urlZipProjeto(projetoId));
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        return UI.toast(body.error || 'Nenhum documento encontrado para este projeto', 'warn');
+      }
+      const blob = await res.blob();
+      const nome = Store.projeto(projetoId)?.nome || projetoId;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `documentos-${nome}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+      UI.toast('Falha ao baixar documentos do projeto', 'error');
+    }
   },
 
   /* ================== DEMANDAS ================== */
@@ -869,6 +1305,7 @@ const App = {
         </div>
       </div>
       <div class="toolbar">
+        <input id="fid" placeholder="ID" value="${escapeHTML(f.id||'')}" style="max-width:90px"/>
         <input id="fq" placeholder="Pesquisar demandas..." value="${escapeHTML(f.q)}" style="min-width:220px;flex:1"/>
         <select id="fcli">${cliOpts}</select>
         <select id="fproj">${projOpts}</select>
@@ -879,19 +1316,23 @@ const App = {
         <input type="date" id="fdata" value="${f.data||''}"/>
         <button class="btn btn-sm" id="fclear"><i class="fa-solid fa-eraser"></i></button>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="demandas-table">
         <thead><tr>
-          <th data-sort="titulo">Título</th><th>Projeto</th><th>Cliente</th><th>Executante</th><th>Equipe</th>
+          <th data-sort="_seq">ID</th><th data-sort="titulo">Título</th><th>Projeto</th><th>Cliente</th><th>Executante</th><th>Equipe</th>
           <th>Status</th><th>Prioridade</th><th data-sort="prazo">Prazo</th><th style="width:170px"></th>
         </tr></thead><tbody id="tbody"></tbody>
       </table></div>`;
 
     const draw = () => {
       let list = Store.demandas().filter(d => {
+        if (f.id) {
+          const alvo = String(f.id).replace(/\D/g,'');
+          if (!alvo || String(Store.demandaSeq(d.id)) !== alvo) return false;
+        }
         if (f.q) {
           const q = f.q.toLowerCase();
           const cli = Store.cliente(d.clienteId), proj = Store.projeto(d.projetoId), resp = Store.pessoa(d.responsavelId);
-          const hay = [d.titulo,d.descricao,cli?.empresa,proj?.nome,resp?.nome,d.status,(d.tags||[]).join(',')].map(v=>(v||'').toLowerCase()).join(' ');
+          const hay = [d.titulo,d.descricao,cli?.empresa,nomeProjeto(d),nomeResponsavel(d),d.status,(d.tags||[]).join(',')].map(v=>(v||'').toLowerCase()).join(' ');
           if (!hay.includes(q)) return false;
         }
         if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(d.clienteId)) return false;
@@ -915,11 +1356,12 @@ const App = {
         const cli = Store.cliente(d.clienteId); const proj = Store.projeto(d.projetoId); const resp = Store.pessoa(d.responsavelId);
         const late = isLate(d);
         return `<tr>
+          <td style="color:var(--text-2);font-variant-numeric:tabular-nums;">#${Store.demandaSeq(d.id)}</td>
           <td><strong style="cursor:pointer" data-a="open" data-id="${d.id}">${escapeHTML(d.titulo)}</strong>
             <div style="margin-top:4px;">${(d.tags||[]).map(t=>`<span class="tag">${escapeHTML(t)}</span>`).join('')}</div></td>
-          <td>${escapeHTML(proj?.nome||'—')}</td>
+          <td>${escapeHTML(nomeProjeto(d)||'—')}</td>
           <td>${escapeHTML(cli?.empresa||'—')}</td>
-          <td>${escapeHTML(resp?.nome||'—')}</td>
+          <td>${escapeHTML(nomeResponsavel(d)||'—')}</td>
           <td>${UI.equipeAreaPill(d.equipeArea)}</td>
           <td>${UI.statusPill(late?'atrasado':d.status)}</td>
           <td>${UI.prioPill(d.prioridade)}</td>
@@ -937,6 +1379,7 @@ const App = {
       tb.querySelectorAll('[data-a="dup"]').forEach(b => b.onclick = () => this.dupDemanda(b.dataset.id));
       tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = () => this.delDemanda(b.dataset.id));
     };
+    $('#fid').addEventListener('input', debounce(e=>{ f.id = e.target.value; draw(); }, 150));
     $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; draw(); }, 150));
     $('#fcli').onchange = e => { f.cliente = e.target.value; f.projeto = ''; doRender(); };
     $('#fproj').onchange = e => {
@@ -952,7 +1395,7 @@ const App = {
       f[map[id]] = e.target.value; draw();
     });
     $('#fdata').onchange = e => { f.data = e.target.value; draw(); };
-    $('#fclear').onclick = () => { this.filters.demandas = { q:'',cliente:'',projeto:'',responsavel:'',equipe:'',status:'',prioridade:'',data:'' }; doRender(); };
+    $('#fclear').onclick = () => { const cli = f.cliente; Object.assign(f, { id:'',q:'',cliente:cli,projeto:'',responsavel:'',equipe:'',status:'',prioridade:'',data:'' }); doRender(); };
     $('#btnNovo').onclick = () => this.openDemandaModal();
     $('#btnImport').onclick = () => this.importCSV('demandas');
     $('#btnCsv').onclick = () => this.exportDemandsCSV();
@@ -979,14 +1422,57 @@ const App = {
         const empresaProjetosMap = JSON.parse(form.dataset.empresaProjetosMap || '{}');
         const todosProjetos = JSON.parse(form.dataset.todosProjetos || '[]');
         const empresaSelect = form.querySelector('[name="empresaSelecionada"]');
-        const clienteSelect = form.querySelector('[name="clienteId"]');
+        const clienteHidden = form.querySelector('input[name="clienteId"]');
         const projetoSelect = form.querySelector('[name="projetoId"]');
 
-        const preencherContatos = (empresa, selecionado='') => {
+        // Liga o toggle mostrar/esconder do campo de texto no <select> já renderizado
+        // no HTML inicial (antes de qualquer onchange de Empresa/Projeto acontecer).
+        const ligarToggleSolicitante = () => {
+          const sel = form.querySelector('#solicitanteField select[name="solicitanteNome"]');
+          const livre = form.querySelector('#solicitanteField input[name="solicitanteNomeLivre"]');
+          if (!sel || !livre) return;
+          sel.onchange = () => {
+            livre.style.display = sel.value==='__novo' ? '' : 'none';
+            clienteHidden.value = (sel.value && sel.value!=='__novo') ? sel.value : '';
+            if (sel.value === '__novo') livre.focus();
+          };
+        };
+        ligarToggleSolicitante();
+
+        // Executante: mesmo padrão do Solicitante — dropdown de equipe interna com
+        // opção "+ Outro..." pra digitar nome de terceiros/contatos do cliente que
+        // não estão cadastrados no sistema.
+        const ligarToggleExecutante = () => {
+          const sel = form.querySelector('#executanteField select[name="responsavelId"]');
+          const livre = form.querySelector('#executanteField input[name="responsavelNomeLivre"]');
+          if (!sel || !livre) return;
+          sel.onchange = () => {
+            livre.style.display = sel.value==='__novo' ? '' : 'none';
+            if (sel.value === '__novo') livre.focus();
+          };
+        };
+        ligarToggleExecutante();
+
+        // Solicitante: dropdown com os contatos já cadastrados da empresa (mesmo padrão
+        // visual dos demais campos), com opção "+ Novo contato..." para digitar um nome novo.
+        // Quando a empresa não tem nenhum contato cadastrado, o campo vira texto livre.
+        const preencherContatos = (empresa, selecionadoId='') => {
           const contatos = empresaMap[empresa] || [];
-          clienteSelect.innerHTML = ['<option value="">—</option>']
-            .concat(contatos.map(c => `<option value="${c.id}" ${c.id===selecionado?'selected':''}>${escapeHTML(c.label)}</option>`))
-            .join('');
+          const solicitanteField = form.querySelector('#solicitanteField');
+          const opts = [{ value:'', label:'—' }, ...contatos.map(c=>({value:c.id,label:c.label})), { value:'__novo', label:'+ Novo contato...' }];
+
+          if (contatos.length) {
+            solicitanteField.innerHTML = `<label>Solicitante (Contato)</label>
+              ${UI.select('solicitanteNome', opts, selecionadoId || '')}
+              <input name="solicitanteNomeLivre" placeholder="Nome do novo contato" style="margin-top:8px;display:none"/>`;
+            ligarToggleSolicitante();
+            const sel = solicitanteField.querySelector('select[name="solicitanteNome"]');
+            if (selecionadoId) { clienteHidden.value = selecionadoId; sel.onchange(); }
+          } else {
+            solicitanteField.innerHTML = `<label>Solicitante (Contato)</label>
+              <input name="solicitanteNome" placeholder="Nome do contato"/>`;
+            clienteHidden.value = '';
+          }
         };
         const preencherProjetos = (empresa, selecionado='') => {
           const lista = empresa ? (empresaProjetosMap[empresa] || []) : todosProjetos;
@@ -1005,30 +1491,51 @@ const App = {
           const clienteDoProjeto = projetoSelect.value ? (projetoClienteMap[projetoSelect.value] || '') : '';
           if (empresaDoProjeto) {
             empresaSelect.value = empresaDoProjeto;
-            // Vincula direto o contato/cliente do projeto escolhido como Solicitante.
+            // Vincula direto o contato/cliente do projeto escolhido como Solicitante (sugestão).
             preencherContatos(empresaDoProjeto, clienteDoProjeto);
             preencherProjetos(empresaDoProjeto, projetoSelect.value);
           }
           // Se o projeto escolhido não tem empresa associada, deixa a Empresa como está.
         };
 
-        // Chips de tags: alterna seleção e sincroniza com o input hidden "tags"
-        const tagsHidden = form.querySelector('input[name="tags"]');
-        const tagPicker = form.querySelector('#tagPicker');
-        tagPicker.querySelectorAll('.tag-chip').forEach(chip => {
-          chip.onclick = () => {
-            chip.classList.toggle('active');
-            const selected = Array.from(tagPicker.querySelectorAll('.tag-chip.active')).map(c => c.dataset.tag);
-            tagsHidden.value = selected.join(', ');
-          };
-        });
-
         root.querySelector('#save').onclick = () => {
           const data = UI.readForm(root.querySelector('#demandaForm'));
           if (!data.titulo) return UI.toast('Título obrigatório','warn');
           delete data.empresaSelecionada;
+          // Resolve o Solicitante: quando veio do dropdown de contatos, `solicitanteNome`
+          // guarda o id do contato (ou "__novo"); o nome de fato pode estar no campo de
+          // texto livre correspondente. Normaliza tudo pra {clienteId, solicitanteNome}.
+          {
+            const solicSel = form.querySelector('select[name="solicitanteNome"]');
+            if (solicSel) {
+              if (solicSel.value === '__novo') {
+                data.solicitanteNome = (data.solicitanteNomeLivre || '').trim();
+                data.clienteId = '';
+              } else if (solicSel.value) {
+                const contatos = empresaMap[empresaSelect.value] || [];
+                const c = contatos.find(x => x.id === solicSel.value);
+                data.clienteId = solicSel.value;
+                data.solicitanteNome = c ? c.label : '';
+              } else {
+                data.solicitanteNome = '';
+                data.clienteId = '';
+              }
+            }
+            delete data.solicitanteNomeLivre;
+          }
+          // Resolve o Executante: mesma lógica do Solicitante — se "+ Outro..." foi
+          // escolhido, guarda o nome digitado em responsavelNome e zera responsavelId.
+          {
+            const respSel = form.querySelector('#executanteField select[name="responsavelId"]');
+            if (respSel && respSel.value === '__novo') {
+              data.responsavelNome = (data.responsavelNomeLivre || '').trim();
+              data.responsavelId = '';
+            } else if (data.responsavelId) {
+              data.responsavelNome = '';
+            }
+            delete data.responsavelNomeLivre;
+          }
           if (!data.criadoPorId) data.criadoPorId = this.currentUserPessoaId || '';
-          data.tags = (data.tags||'').split(',').map(t=>t.trim()).filter(Boolean);
           data.tempoGasto = parseFloat(data.tempoGasto)||0;
           const record = {
             id: d?.id,
@@ -1069,20 +1576,22 @@ const App = {
     const comments = (d.comentarios||[]).map(c => `
       <div class="comment"><span class="who">${escapeHTML(c.autor)}</span><span class="when">${fmtDate(c.data)}</span><div>${escapeHTML(c.texto)}</div></div>`).join('') || '<div class="empty" style="padding:12px">Sem comentários.</div>';
     const hist = (d.historico||[]).slice().reverse().map(h => `<div style="font-size:12px;color:var(--text-2);padding:4px 0;">• ${fmtDate(h.data)} — ${escapeHTML(h.texto)}</div>`).join('');
+    const osDaDemanda = OSStore.all().filter(os => os.demandaId === d.id).sort((a,b)=>Number(b.numero||0)-Number(a.numero||0));
 
     UI.drawer({
-      title: d.titulo,
+      title: `#${Store.demandaSeq(d.id)} · ${d.titulo}`,
       body: `
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
           ${UI.statusPill(isLate(d)?'atrasado':d.status)} ${UI.prioPill(d.prioridade)}
           ${(d.tags||[]).map(t=>`<span class="tag">${escapeHTML(t)}</span>`).join('')}
         </div>
         <div style="font-size:13px;color:var(--text-2);margin-bottom:10px;">${escapeHTML(d.descricao||'')}</div>
+        ${d.proximosPassos ? `<div style="font-size:13px;margin-bottom:10px;"><b>Próximos passos:</b> ${escapeHTML(d.proximosPassos)}</div>` : ''}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px;">
-          <div><b>Projeto:</b> ${escapeHTML(proj?.nome||'—')}</div>
+          <div><b>Projeto:</b> ${escapeHTML(nomeProjeto(d)||'—')}</div>
           <div><b>Cliente:</b> ${escapeHTML(cli?.empresa||'—')}</div>
-          <div><b>Solicitante:</b> ${escapeHTML(cli?.contato || cli?.nome || '—')}</div>
-          <div><b>Executante:</b> ${escapeHTML(resp?.nome||'—')}</div>
+          <div><b>Solicitante:</b> ${escapeHTML(d.solicitanteNome || cli?.contato || cli?.nome || '—')}</div>
+          <div><b>Executante:</b> ${escapeHTML(nomeResponsavel(d)||'—')}</div>
           <div><b>Criado por:</b> ${escapeHTML(criador?.nome||'—')}</div>
           <div><b>Equipe:</b> ${UI.equipeAreaPill(d.equipeArea)}</div>
           <div><b>Prazo:</b> ${fmtDate(d.prazo)}</div>
@@ -1101,8 +1610,21 @@ const App = {
           <input id="cmNew" placeholder="Escrever comentário..." style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);"/>
           <button class="btn btn-sm btn-primary" id="cmAdd"><i class="fa-solid fa-paper-plane"></i></button>
         </div>
+        <div class="section-title">Documentos</div>
+        <div id="docsList"><div class="empty" style="padding:12px">Carregando...</div></div>
+        <div class="file-upload" style="margin-top:10px;">
+          <label class="file-upload-label" for="docFile">
+            <i class="fa-solid fa-paperclip"></i> Escolher arquivo
+          </label>
+          <span class="file-upload-hint" id="docFileHint">Nenhum arquivo selecionado</span>
+          <input type="file" id="docFile"/>
+          <button class="btn btn-primary btn-sm" id="docAdd" style="margin-left:auto;"><i class="fa-solid fa-upload"></i> Enviar</button>
+        </div>
         <div class="section-title">Histórico</div>
         ${hist || '<div class="empty" style="padding:12px">Sem histórico.</div>'}
+        <div class="section-title">Ordens de Serviço</div>
+        <div class="os-integration-banner"><i class="fa-solid fa-screwdriver-wrench"></i><div><strong>${osDaDemanda.length ? `${osDaDemanda.length} OS vinculada(s)` : 'Nenhuma OS vinculada'}</strong><div>Crie uma OS a partir desta demanda para reaproveitar cliente, solicitante e executante.</div></div><button class="btn btn-sm btn-primary" id="btnNovaOSDaDemanda" style="margin-left:auto;white-space:nowrap"><i class="fa-solid fa-plus"></i> Nova OS</button></div>
+        ${osDaDemanda.length ? `<div style="display:flex;flex-direction:column;gap:6px;">${osDaDemanda.map(os=>`<button class="btn btn-ghost" data-os-demanda="${os.id}" style="justify-content:space-between;text-align:left;border:1px solid var(--border);"><span><strong>OS-${Number(os.numero||0).toString().padStart(5,'0')}</strong> · ${escapeHTML(this.osStatusLabel(os.statusOs))}</span><span>${os.apontamentos?.length||0} apont.</span></button>`).join('')}</div>` : ''}
         <div style="display:flex;gap:6px;margin-top:20px;flex-wrap:wrap;">
           ${onVoltar ? '<button class="btn" id="btnVoltar"><i class="fa-solid fa-arrow-left"></i> Voltar</button>' : ''}
           <button class="btn" id="btnEdit"><i class="fa-solid fa-pen"></i> Editar</button>
@@ -1110,6 +1632,26 @@ const App = {
           <button class="btn btn-danger" id="btnDel"><i class="fa-solid fa-trash"></i> Excluir</button>
         </div>`,
       onOpen: (root, close) => {
+        this.carregarDocumentosDemanda(root, id);
+        const docFileInput = root.querySelector('#docFile');
+        const docFileHint = root.querySelector('#docFileHint');
+        docFileInput.onchange = () => {
+          docFileHint.textContent = docFileInput.files[0]?.name || 'Nenhum arquivo selecionado';
+        };
+        root.querySelector('#docAdd').onclick = async () => {
+          const file = docFileInput.files[0];
+          if (!file) return UI.toast('Selecione um arquivo', 'warn');
+          try {
+            await Documentos.upload(id, file);
+            docFileInput.value = '';
+            docFileHint.textContent = 'Nenhum arquivo selecionado';
+            UI.toast('Documento enviado', 'success');
+            this.carregarDocumentosDemanda(root, id);
+          } catch (err) {
+            console.error(err);
+            UI.toast('Falha ao enviar documento', 'error');
+          }
+        };
         root.querySelectorAll('[data-ck]').forEach(cb => cb.onchange = () => {
           const item = d.checklist.find(x=>x.id===cb.dataset.ck);
           if (item) {
@@ -1117,7 +1659,7 @@ const App = {
             item.doneEm = cb.checked ? new Date().toISOString() : null;
             d.historico = d.historico || [];
             d.historico.push({ tipo:'checklist', data:new Date().toISOString(), texto:`Item do checklist ${cb.checked?'concluído':'reaberto'}: "${item.texto}"` });
-            Store.save(); this.openDemandaDrawer(id, onVoltar);
+            Store.upsert('demandas', d); this.openDemandaDrawer(id, onVoltar);
           }
         });
         root.querySelector('#ckAdd').onclick = () => {
@@ -1126,7 +1668,7 @@ const App = {
           d.checklist.push({ id: uid('ck'), texto:v, done:false, doneEm:null });
           d.historico = d.historico || [];
           d.historico.push({ tipo:'checklist', data:new Date().toISOString(), texto:`Item adicionado ao checklist: "${v}"` });
-          Store.save(); this.openDemandaDrawer(id, onVoltar);
+          Store.upsert('demandas', d); this.openDemandaDrawer(id, onVoltar);
         };
         root.querySelector('#cmAdd').onclick = () => {
           const v = root.querySelector('#cmNew').value.trim(); if (!v) return;
@@ -1134,14 +1676,55 @@ const App = {
           d.comentarios.push({ id: uid('cm'), autor:'Você', texto:v, data:new Date().toISOString() });
           d.historico = d.historico || [];
           d.historico.push({ tipo:'comentario', data:new Date().toISOString(), texto:'Comentário adicionado' });
-          Store.save(); this.openDemandaDrawer(id, onVoltar);
+          Store.upsert('demandas', d); this.openDemandaDrawer(id, onVoltar);
         };
+        root.querySelector('#btnNovaOSDaDemanda')?.addEventListener('click', () => { close(); this.openOSModal(null, d.id); });
+        root.querySelectorAll('[data-os-demanda]').forEach(btn => btn.onclick = () => { close(); this.openOSDrawer(btn.dataset.osDemanda); });
         if (onVoltar) root.querySelector('#btnVoltar').onclick = () => { close(); onVoltar(); };
         root.querySelector('#btnEdit').onclick = () => { close(); this.openDemandaModal(d); };
         root.querySelector('#btnDup').onclick = () => { close(); this.dupDemanda(id); };
         root.querySelector('#btnDel').onclick = () => { close(); this.delDemanda(id); };
       }
     });
+  },
+
+  // Busca e renderiza a lista de documentos de uma demanda dentro do drawer
+  // já aberto. Separado do corpo do drawer porque documentos não vêm do
+  // bootstrap (Store.state) — sempre um fetch à parte.
+  async carregarDocumentosDemanda(root, demandaId) {
+    const list = root.querySelector('#docsList');
+    if (!list) return; // drawer pode já ter sido fechado quando a resposta chega
+    try {
+      const docs = await Documentos.listar(demandaId);
+      list.innerHTML = docs.length
+        ? docs.map(doc => `
+          <div class="comment" style="display:flex;align-items:center;gap:8px;">
+            <i class="fa-solid fa-file"></i>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHTML(doc.nomeArquivo)}</div>
+              <div style="font-size:11px;color:var(--text-2);">${fmtBytes(doc.tamanho)} · ${fmtDate(doc.createdAt)}</div>
+            </div>
+            <a class="icon-btn" href="${Documentos.urlDownload(doc.id)}" title="Baixar"><i class="fa-solid fa-download"></i></a>
+            <button class="icon-btn" data-doc-del="${doc.id}" title="Excluir"><i class="fa-solid fa-trash"></i></button>
+          </div>`).join('')
+        : '<div class="empty" style="padding:12px">Nenhum documento anexado.</div>';
+
+      list.querySelectorAll('[data-doc-del]').forEach(btn => btn.onclick = () => {
+        UI.confirm('Excluir documento', 'Tem certeza que deseja excluir este documento?', async () => {
+          try {
+            await Documentos.remover(btn.dataset.docDel);
+            UI.toast('Documento excluído', 'success');
+            this.carregarDocumentosDemanda(root, demandaId);
+          } catch (err) {
+            console.error(err);
+            UI.toast('Falha ao excluir documento', 'error');
+          }
+        });
+      });
+    } catch (err) {
+      console.error(err);
+      list.innerHTML = '<div class="empty" style="padding:12px">Falha ao carregar documentos.</div>';
+    }
   },
 
   /* ================== KANBAN ================== */
@@ -1184,7 +1767,7 @@ const App = {
       if (f.q) {
         const q = f.q.toLowerCase();
         const cli = Store.cliente(d.clienteId), proj = Store.projeto(d.projetoId), resp = Store.pessoa(d.responsavelId);
-        const hay = [d.titulo,d.descricao,cli?.empresa,proj?.nome,resp?.nome,(d.tags||[]).join(',')].map(v=>(v||'').toLowerCase()).join(' ');
+        const hay = [d.titulo,d.descricao,cli?.empresa,nomeProjeto(d),nomeResponsavel(d),(d.tags||[]).join(',')].map(v=>(v||'').toLowerCase()).join(' ');
         if (!hay.includes(q)) return false;
       }
       if (clienteIdsSelecionados && !clienteIdsSelecionados.includes(d.clienteId)) return false;
@@ -1253,7 +1836,7 @@ const App = {
         ${d.equipeArea ? `<div style="margin-top:6px;">${UI.equipeAreaPill(d.equipeArea)}</div>` : ''}
         <div class="k-card-tags">${(d.tags||[]).map(t=>`<span class="k-tag">${escapeHTML(t)}</span>`).join('')}</div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
-          <div class="avatar" style="width:24px;height:24px;font-size:10px">${initials(resp?.nome||'?')}</div>
+          <div class="avatar" style="width:24px;height:24px;font-size:10px">${initials(nomeResponsavel(d)||'?')}</div>
           <button class="icon-btn" style="width:26px;height:26px;" data-open="${d.id}"><i class="fa-solid fa-eye" style="font-size:11px"></i></button>
         </div>
       </div>`;
@@ -1460,7 +2043,7 @@ const App = {
       return `<div class="dashboard-modal-item" data-open-dem="${d.id}" style="cursor:pointer;">
         <div>
           <strong>${escapeHTML(d.titulo)}</strong>
-          <span>${escapeHTML(cli?.empresa || 'Sem cliente')} · ${escapeHTML(proj?.nome || 'Sem projeto')} · ${escapeHTML(resp?.nome || 'Sem executante')}</span>
+          <span>${escapeHTML(cli?.empresa || 'Sem cliente')} · ${escapeHTML(nomeProjeto(d) || 'Sem projeto')} · ${escapeHTML(nomeResponsavel(d) || 'Sem executante')}</span>
         </div>
         ${UI.statusPill(isLate(d) ? 'atrasado' : d.status)}
       </div>`;
@@ -1717,13 +2300,141 @@ const App = {
         ${UI.statusPill(p.status)}
       </div>
       ${dems.length ? `<div class="dashboard-modal-list">${dems.map(d => {
-        const respD = Store.pessoa(d.responsavelId);
-        return `<div class="dashboard-modal-item"><div><strong>${escapeHTML(d.titulo)}</strong><span>${escapeHTML(respD?.nome || 'Sem executante')} · Prazo: ${fmtDate(d.prazo)}</span></div>${UI.statusPill(isLate(d) ? 'atrasado' : d.status)}</div>`;
+        return `<div class="dashboard-modal-item"><div><strong>${escapeHTML(d.titulo)}</strong><span>${escapeHTML(nomeResponsavel(d) || 'Sem executante')} · Prazo: ${fmtDate(d.prazo)}</span></div>${UI.statusPill(isLate(d) ? 'atrasado' : d.status)}</div>`;
       }).join('')}</div>` : UI.emptyState('list-check','Nenhuma demanda cadastrada para este projeto.')}
     `;
     UI.modal({ title: p.nome, size:'lg', body, footer:'<button class="btn" data-close-modal>Fechar</button>', onOpen: (root, close) => {
       root.querySelector('[data-close-modal]').onclick = close;
     }});
+  },
+
+  // Gera um relatório de cronograma (PDF, via impressão) para enviar ao cliente:
+  // uma tabela cronológica de projetos + demandas com datas/status, e uma barra
+  // de linha do tempo (Gantt simplificado, feito com divs — canvas não imprime
+  // de forma confiável na janela de print do exportPDF).
+  exportCronogramaCliente(nomeEmpresa, projetos, demandas) {
+    // Só entram itens com data (início e/ou prazo) — sem isso não há o que
+    // posicionar num cronograma.
+    const itensProjeto = projetos
+      .filter(p => p.inicio || p.prazo)
+      .map(p => ({
+        tipo: 'Projeto', titulo: p.nome, status: p.status,
+        inicio: p.inicio ? parseLocalDate(p.inicio) : (p.prazo ? parseLocalDate(p.prazo) : null),
+        fim: p.prazo ? parseLocalDate(p.prazo) : (p.inicio ? parseLocalDate(p.inicio) : null),
+      }));
+    const itensDemanda = demandas
+      .filter(d => d.prazo)
+      .map(d => ({
+        tipo: 'Demanda', titulo: d.titulo, status: isLate(d) ? 'atrasado' : d.status,
+        inicio: parseLocalDate(d.prazo), fim: parseLocalDate(d.prazo),
+        projetoNome: d.projetoId ? nomeProjeto(d) : '',
+      }));
+    const itens = [...itensProjeto, ...itensDemanda].sort((a,b) => a.inicio - b.inicio);
+
+    if (!itens.length) { UI.toast('Nenhum projeto ou demanda com data para montar o cronograma','warn'); return; }
+
+    const menorData = itens.reduce((min,i) => i.inicio < min ? i.inicio : min, itens[0].inicio);
+    const maiorData = itens.reduce((max,i) => i.fim > max ? i.fim : max, itens[0].fim);
+    const totalDias = Math.max(1, daysBetween(menorData, maiorData));
+    const pctPos = (d) => Math.min(100, Math.max(0, (daysBetween(menorData, d) / totalDias) * 100));
+    const pctWidth = (a,b) => Math.max(1.2, ((daysBetween(a,b) / totalDias) * 100));
+
+    const gantt = itens.map(i => {
+      const left = pctPos(i.inicio);
+      const width = pctWidth(i.inicio, i.fim);
+      const cor = STATUS[i.status]?.color || '#6366f1';
+      return `<tr>
+        <td style="border:none;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis;">${escapeHTML(i.titulo)}${i.tipo==='Demanda'?' <span style="color:#888;font-size:10px;">(demanda)</span>':''}</td>
+        <td style="border:none;position:relative;padding:4px 8px;">
+          <div style="position:relative;height:14px;background:#f0f0f0;border-radius:4px;">
+            <div style="position:absolute;left:${left}%;width:${width}%;height:100%;background:${cor};border-radius:4px;"></div>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    // Detalhamento agrupado por projeto: cada projeto vira um bloco com
+    // cabeçalho (nome, período, status) e as demandas dele listadas embaixo,
+    // ordenadas por prazo. Demandas sem projeto (ou com um dos valores
+    // especiais tipo "Fora do escopo") caem num bloco à parte no final.
+    const statusChip = (st) => {
+      const s = STATUS[st] || STATUS.backlog;
+      return `<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:700;background:${s.color}1a;color:${s.color};white-space:nowrap;"><span style="width:6px;height:6px;border-radius:50%;background:${s.color};display:inline-block;"></span>${escapeHTML(s.label)}</span>`;
+    };
+
+    const demandasPorProjeto = {};
+    const demandasSemProjeto = [];
+    demandas.forEach(d => {
+      const st = isLate(d) ? 'atrasado' : d.status;
+      const row = { titulo: d.titulo, prazo: d.prazo ? parseLocalDate(d.prazo) : null, status: st };
+      if (d.projetoId && Store.projeto(d.projetoId)) {
+        (demandasPorProjeto[d.projetoId] = demandasPorProjeto[d.projetoId] || []).push(row);
+      } else {
+        demandasSemProjeto.push({ ...row, projetoNome: d.projetoId ? nomeProjeto(d) : '' });
+      }
+    });
+    Object.values(demandasPorProjeto).forEach(list => list.sort((a,b) => (a.prazo||0) - (b.prazo||0)));
+    demandasSemProjeto.sort((a,b) => (a.prazo||0) - (b.prazo||0));
+
+    const demandaLinha = (d) => `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0 9px 18px;border-top:1px solid #eee;">
+        <div style="min-width:0;display:flex;align-items:center;gap:8px;">
+          <span style="width:5px;height:5px;border-radius:50%;background:#c7cad1;flex:none;"></span>
+          <span style="font-size:12.5px;color:#222;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHTML(d.titulo)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px;flex:none;">
+          <span style="font-size:11px;color:#888;">${d.prazo ? fmtDate(d.prazo) : '—'}</span>
+          ${statusChip(d.status)}
+        </div>
+      </div>`;
+
+    const projetosOrdenados = projetos.slice().sort((a,b) => {
+      const da = a.inicio ? parseLocalDate(a.inicio) : (a.prazo ? parseLocalDate(a.prazo) : new Date(8640000000000000));
+      const db = b.inicio ? parseLocalDate(b.inicio) : (b.prazo ? parseLocalDate(b.prazo) : new Date(8640000000000000));
+      return da - db;
+    });
+
+    const blocoProjeto = (p) => {
+      const dems = demandasPorProjeto[p.id] || [];
+      const concluidas = dems.filter(d => d.status === 'concluido').length;
+      return `
+      <div style="border:1px solid #e3e5e9;border-radius:10px;margin-bottom:14px;overflow:hidden;page-break-inside:avoid;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:#f7f8fa;border-bottom:${dems.length ? '1px solid #e3e5e9' : 'none'};">
+          <div style="min-width:0;">
+            <div style="font-size:13.5px;font-weight:700;color:#111;">${escapeHTML(p.nome)}</div>
+            <div style="font-size:11px;color:#888;margin-top:2px;">Início: ${fmtDate(p.inicio)} · Prazo: ${fmtDate(p.prazo)}${dems.length ? ` · ${concluidas}/${dems.length} demanda(s) concluída(s)` : ''}</div>
+          </div>
+          ${statusChip(p.status)}
+        </div>
+        ${dems.length ? `<div style="padding:0 16px;">${dems.map(demandaLinha).join('')}</div>` : `<div style="padding:10px 16px;font-size:11.5px;color:#aaa;">Nenhuma demanda com prazo vinculada a este projeto.</div>`}
+      </div>`;
+    };
+
+    const blocoSemProjeto = demandasSemProjeto.length ? `
+      <div style="border:1px solid #e3e5e9;border-radius:10px;margin-bottom:14px;overflow:hidden;page-break-inside:avoid;">
+        <div style="padding:12px 16px;background:#f7f8fa;border-bottom:1px solid #e3e5e9;">
+          <div style="font-size:13.5px;font-weight:700;color:#111;">Sem projeto vinculado</div>
+        </div>
+        <div style="padding:0 16px;">${demandasSemProjeto.map(demandaLinha).join('')}</div>
+      </div>` : '';
+
+    const body = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:16px;margin-bottom:20px;border-bottom:2px solid #6366f1;">
+        <div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8b5cf6;font-weight:700;">FlowDesk · Cronograma</div>
+          <div style="font-size:19px;font-weight:800;color:#111;margin-top:2px;">${escapeHTML(nomeEmpresa)}</div>
+        </div>
+        <div style="text-align:right;font-size:11.5px;color:#777;">
+          <div>Período: <strong style="color:#333;">${fmtDate(menorData)} — ${fmtDate(maiorData)}</strong></div>
+          <div style="margin-top:2px;">${projetos.length} projeto(s) · ${demandas.length} demanda(s)</div>
+        </div>
+      </div>
+      <h2 style="font-size:14px;margin:0 0 10px;color:#333;">Linha do tempo</h2>
+      <table style="margin-bottom:30px;border:none;"><tbody>${gantt}</tbody></table>
+      <h2 style="font-size:14px;margin:0 0 12px;color:#333;">Detalhamento por projeto</h2>
+      ${projetosOrdenados.map(blocoProjeto).join('')}
+      ${blocoSemProjeto}`;
+    exportPDF(`Cronograma — ${nomeEmpresa}`, body, true);
   },
 
   /* ================== REUNIÕES ================== */
@@ -2304,7 +3015,7 @@ const App = {
     });
     const porResp = {};
     dems.forEach(d => {
-      const p = Store.pessoa(d.responsavelId); const n = p?.nome||'—';
+      const n = nomeResponsavel(d)||'—';
       porResp[n] = (porResp[n]||0)+1;
     });
     const tempoMedio = (() => {
@@ -2370,15 +3081,16 @@ const App = {
   applySort(list) {
     const { col, dir } = this.sort; if (!col) return;
     list.sort((a,b) => {
-      const va = a[col]||''; const vb = b[col]||'';
+      const va = col==='_seq' ? (Store.demandaSeq(a.id)||0) : (a[col]||'');
+      const vb = col==='_seq' ? (Store.demandaSeq(b.id)||0) : (b[col]||'');
       if (va < vb) return -1*dir; if (va > vb) return 1*dir; return 0;
     });
   },
 
   exportDemandsCSV() {
     const rows = Store.demandas().map(d => ({
-      titulo:d.titulo, projeto:Store.projeto(d.projetoId)?.nome||'',
-      cliente:Store.cliente(d.clienteId)?.empresa||'', responsavel:Store.pessoa(d.responsavelId)?.nome||'',
+      titulo:d.titulo, projeto:nomeProjeto(d)||'',
+      cliente:Store.cliente(d.clienteId)?.empresa||'', responsavel:nomeResponsavel(d)||'',
       equipe:EQUIPE_AREA[d.equipeArea]?.label||'',
       status:STATUS[d.status]?.label, prioridade:PRIORIDADE[d.prioridade]?.label,
       criacao:fmtDate(d.criacao), prazo:fmtDate(d.prazo), tempoGasto:d.tempoGasto,
@@ -2623,8 +3335,414 @@ const App = {
     const dems = Store.demandas();
     const body = `<h2>Relatório de Demandas</h2>
       <table><thead><tr><th>Título</th><th>Cliente</th><th>Executante</th><th>Status</th><th>Prazo</th><th>Tempo (h)</th></tr></thead>
-      <tbody>${dems.map(d=>`<tr><td>${escapeHTML(d.titulo)}</td><td>${escapeHTML(Store.cliente(d.clienteId)?.empresa||'')}</td><td>${escapeHTML(Store.pessoa(d.responsavelId)?.nome||'')}</td><td>${STATUS[d.status]?.label}</td><td>${fmtDate(d.prazo)}</td><td>${d.tempoGasto||0}</td></tr>`).join('')}</tbody></table>`;
+      <tbody>${dems.map(d=>`<tr><td>${escapeHTML(d.titulo)}</td><td>${escapeHTML(Store.cliente(d.clienteId)?.empresa||'')}</td><td>${escapeHTML(nomeResponsavel(d)||'')}</td><td>${STATUS[d.status]?.label}</td><td>${fmtDate(d.prazo)}</td><td>${d.tempoGasto||0}</td></tr>`).join('')}</tbody></table>`;
     exportPDF('FlowDesk — Relatório', body);
+  },
+
+  /* ================== TRANSIÇÃO PARA O CS ================== */
+  transicaoTab: 'lista',
+
+  render_transicaocs(root) {
+    const list = Store.transicoes().slice().sort((a,b) => new Date(b.criacao||0) - new Date(a.criacao||0));
+    const statusLabel = (t) => TransicaoCS.isAssinado(t)
+      ? '<span class="status concluido"><span class="dot" style="background:#10b981"></span>Assinado</span>'
+      : '<span class="status cliente"><span class="dot" style="background:#f59e0b"></span>Pendente</span>';
+
+    root.innerHTML = `
+      <div class="page-header">
+        <div><h1 class="page-title">Transição para o CS</h1><div class="page-subtitle">Formulário de passagem de bastão da implantação para o Customer Success.</div></div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary" id="btnNovaTransicao"><i class="fa-solid fa-plus"></i> Nova passagem de bastão</button>
+        </div>
+      </div>
+      ${!list.length ? UI.emptyState('right-left','Nenhuma passagem de bastão registrada ainda.') : `
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Cliente</th><th>GP</th><th>Data prevista</th><th>Status</th><th>Criado em</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${list.map(t => {
+              const cli = Store.cliente(t.clienteId);
+              const gp = Store.pessoa(t.gpId);
+              const assinado = TransicaoCS.isAssinado(t);
+              return `<tr data-id="${t.id}" style="cursor:pointer;">
+                <td><b>${escapeHTML(t.clienteEmpresa || cli?.empresa || '—')}</b></td>
+                <td>${escapeHTML(gp?.nome || '—')}</td>
+                <td>${t.dataTransicao ? fmtDate(t.dataTransicao) : '—'}</td>
+                <td>${statusLabel(t)}</td>
+                <td>${fmtDate(t.criacao)}</td>
+                <td style="text-align:right;white-space:nowrap;">
+                  ${!assinado ? `<button class="icon-btn" data-del-transicao="${t.id}" title="Excluir" style="margin-right:6px;"><i class="fa-solid fa-trash" style="color:#ef4444"></i></button>` : ''}
+                  <i class="fa-solid fa-chevron-right" style="color:var(--text-2)"></i>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`}
+    `;
+    $('#btnNovaTransicao').onclick = () => this.openTransicaoModal();
+    root.querySelectorAll('tr[data-id]').forEach(row => row.onclick = () => this.openTransicaoDetalhe(row.dataset.id));
+    root.querySelectorAll('[data-del-transicao]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.delTransicao;
+        UI.confirm('Excluir transição', 'Esta ação não pode ser desfeita.', () => {
+          Store.remove('transicoes', id);
+          UI.toast('Transição excluída','success');
+          this.render();
+        });
+      };
+    });
+  },
+
+  openTransicaoModal(t=null) {
+    // Agrupa por empresa (mesmo padrão do formulário de demanda) para não listar
+    // um contato por linha — só uma opção por empresa no dropdown.
+    const empresaMap = {};
+    Store.clientes().forEach(c => {
+      const key = (c.empresa || '').trim();
+      if (!key) return;
+      if (!empresaMap[key]) empresaMap[key] = c.id; // guarda o primeiro cliente daquela empresa como referência
+    });
+    const empresasUnicas = Object.keys(empresaMap).sort((a,b) => a.localeCompare(b));
+    const cliOpts = empresasUnicas.map(emp => ({ value: emp, label: emp }));
+    const gpOpts = Store.equipe().map(e => ({ value: e.id, label: e.nome }));
+
+    const empresaAtual = t?.clienteEmpresa || (t?.clienteId ? (Store.cliente(t.clienteId)?.empresa || '') : '');
+
+    UI.modal({
+      title: t ? 'Editar Transição' : 'Nova Passagem de Bastão',
+      body: `
+        <form id="transicaoForm" class="form-grid">
+          <div class="field full"><label>Cliente *</label>${UI.select('clienteEmpresa', [{value:'',label:'Selecione...'},...cliOpts], empresaAtual, 'required')}</div>
+          <div class="field"><label>GP responsável *</label>${UI.select('gpId', [{value:'',label:'Selecione...'},...gpOpts], t?.gpId||'', 'required')}</div>
+          <div class="field"><label>Data da transição *</label><input type="date" name="dataTransicao" required value="${t?.dataTransicao?isoDay(t.dataTransicao):''}"/></div>
+        </form>`,
+      footer: `<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="saveTransicao"><i class="fa-solid fa-check"></i> ${t?'Salvar':'Criar e continuar'}</button>`,
+      onOpen: (root, close) => {
+        root.querySelector('[data-close-modal]').onclick = close;
+        root.querySelector('#saveTransicao').onclick = () => {
+          const data = UI.readForm(root.querySelector('#transicaoForm'));
+          if (!data.clienteEmpresa || !data.gpId || !data.dataTransicao) return UI.toast('Preencha cliente, GP e data','warn');
+          const registro = {
+            id: t?.id,
+            clienteId: empresaMap[data.clienteEmpresa] || t?.clienteId || '',
+            clienteEmpresa: data.clienteEmpresa,
+            gpId: data.gpId,
+            dataTransicao: data.dataTransicao,
+            respostas: t?.respostas || {},
+            assinaturas: t?.assinaturas || {},
+            criacao: t?.criacao || new Date().toISOString(),
+          };
+          Store.upsert('transicoes', registro);
+          close();
+          UI.toast('Transição salva','success');
+          this.render();
+          this.openTransicaoDetalhe(registro.id);
+        };
+      }
+    });
+  },
+
+  openTransicaoDetalhe(id) {
+    const t = Store.transicao(id); if (!t) return;
+    const bloqueado = TransicaoCS.isAssinado(t);
+    const cli = Store.cliente(t.clienteId);
+    const gp = Store.pessoa(t.gpId);
+
+    const body = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+        <div>
+          <div style="font-size:12px;color:var(--text-2)">Cliente</div>
+          <div style="font-weight:700;font-size:15px;">${escapeHTML(t.clienteEmpresa || cli?.empresa || '—')}</div>
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--text-2)">GP</div>
+          <div style="font-weight:600;">${escapeHTML(gp?.nome || '—')}</div>
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--text-2)">Data da transição</div>
+          <div style="font-weight:600;">${t.dataTransicao ? fmtDate(t.dataTransicao) : '—'}</div>
+        </div>
+        <div>
+          ${bloqueado
+            ? '<span class="status concluido"><span class="dot" style="background:#10b981"></span>Documento assinado</span>'
+            : '<span class="status cliente"><span class="dot" style="background:#f59e0b"></span>Aguardando assinaturas</span>'}
+        </div>
+      </div>
+      ${!bloqueado ? `<div style="display:flex;gap:6px;margin-bottom:16px;">
+        <button class="btn" id="btnEditTransicaoHead"><i class="fa-solid fa-pen"></i> Editar dados</button>
+        <button class="btn btn-danger" id="btnExcluirTransicao"><i class="fa-solid fa-trash"></i> Excluir</button>
+      </div>` : ''}
+      <div class="section-title">Questionário de passagem de bastão</div>
+      <form id="transicaoQuestForm" class="form-grid" style="margin-bottom:20px;">
+        ${TransicaoCS.PERGUNTAS.map((p, i) => `
+          <div class="field full">
+            <label>${escapeHTML(p)}</label>
+            <textarea name="q${i}" ${bloqueado?'disabled':''} rows="2">${escapeHTML(t.respostas?.['q'+i]||'')}</textarea>
+          </div>
+        `).join('')}
+      </form>
+      ${!bloqueado ? `<button class="btn" id="btnSalvarRespostas" style="margin-bottom:20px;"><i class="fa-solid fa-floppy-disk"></i> Salvar respostas</button>` : ''}
+
+      <div class="section-title">Assinaturas obrigatórias</div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;">
+        ${TransicaoCS.ASSINANTES.map(a => TransicaoCS.renderAssinanteRow(t, a)).join('')}
+      </div>
+      ${bloqueado ? `<p style="font-size:12px;color:var(--text-2);margin-top:10px;"><i class="fa-solid fa-lock"></i> Documento assinado por todos os signatários. As informações estão bloqueadas para edição.</p>` : ''}
+      <div style="display:flex;gap:6px;margin-top:20px;">
+        <button class="btn" id="btnGerarDocTransicao"><i class="fa-solid fa-file-lines"></i> Gerar documento</button>
+      </div>
+    `;
+
+    const { close } = UI.drawer({
+      title: 'Transição para o CS',
+      body,
+      onOpen: (root) => {
+        if (!bloqueado) {
+          const editHead = root.querySelector('#btnEditTransicaoHead');
+          if (editHead) editHead.onclick = () => { close(); this.openTransicaoModal(t); };
+
+          const delBtn = root.querySelector('#btnExcluirTransicao');
+          if (delBtn) delBtn.onclick = () => {
+            UI.confirm('Excluir transição', 'Esta ação não pode ser desfeita.', () => {
+              Store.remove('transicoes', t.id);
+              close();
+              UI.toast('Transição excluída','success');
+              this.render();
+            });
+          };
+
+          root.querySelector('#btnSalvarRespostas').onclick = () => {
+            const data = UI.readForm(root.querySelector('#transicaoQuestForm'));
+            t.respostas = { ...(t.respostas||{}), ...data };
+            Store.upsert('transicoes', t);
+            UI.toast('Respostas salvas','success');
+          };
+
+          TransicaoCS.ASSINANTES.forEach(a => {
+            const btn = root.querySelector(`[data-assinar="${a.key}"]`);
+            if (!btn) return;
+            btn.onclick = async () => {
+              const nome = App.currentUser?.nome;
+              if (!nome) return UI.toast('Não foi possível identificar seu usuário','warn');
+              const payload = {
+                ...t,
+                assinaturas: { ...(t.assinaturas || {}), [a.key]: { nome, data: new Date().toISOString() } },
+              };
+              btn.disabled = true;
+              try {
+                const saved = await Store.upsertAwait('transicoes', payload);
+                Object.assign(t, saved);
+                UI.toast(`Assinado por ${nome}`,'success');
+                close();
+                this.openTransicaoDetalhe(t.id);
+              } catch (err) {
+                // Backend recusou (ex.: a pessoa logada não é a autorizada para esta key).
+                btn.disabled = false;
+                UI.toast(err?.message || 'Não foi possível assinar','error');
+              }
+            };
+          });
+        }
+
+        root.querySelector('#btnGerarDocTransicao').onclick = () => this.exportTransicaoPDF(t);
+      }
+    });
+  },
+
+  exportTransicaoPDF(t) {
+    const cli = Store.cliente(t.clienteId);
+    const gp = Store.pessoa(t.gpId);
+    const bloqueado = TransicaoCS.isAssinado(t);
+    const empresa = escapeHTML(t.clienteEmpresa || cli?.empresa || '—');
+    const contato = cli?.contato || cli?.nome || '';
+
+    const perguntasHTML = TransicaoCS.PERGUNTAS.map((p, i) => {
+      const resp = (t.respostas?.['q'+i] || '').trim();
+      return `
+      <div class="qa">
+        <div class="qa-q"><span class="qa-num">${String(i+1).padStart(2,'0')}</span>${escapeHTML(p)}</div>
+        <div class="qa-a">${resp ? escapeHTML(resp).replace(/\n/g,'<br>') : '<span class="muted">Sem resposta registrada.</span>'}</div>
+      </div>`;
+    }).join('');
+
+    const assinaturasHTML = TransicaoCS.ASSINANTES.map(a => {
+      const s = t.assinaturas?.[a.key];
+      const nomeEsperado = a.key === 'gp' ? (gp?.nome || 'GP responsável') : a.nomeFixo;
+      return `
+      <div class="sig-card ${s ? 'sig-ok' : 'sig-pending'}">
+        <div class="sig-icon">${s ? '&#10003;' : '&#9679;'}</div>
+        <div class="sig-info">
+          <div class="sig-role">${escapeHTML(a.label)}</div>
+          <div class="sig-name">${escapeHTML(nomeEsperado)}</div>
+          ${s
+            ? `<div class="sig-meta">Assinado por <b>${escapeHTML(s.nome)}</b><br>${new Date(s.data).toLocaleString('pt-BR')}</div>`
+            : `<div class="sig-meta muted">Assinatura pendente</div>`}
+        </div>
+      </div>`;
+    }).join('');
+
+    const geradoEm = new Date().toLocaleString('pt-BR');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Transição CS — ${empresa}</title>
+<style>
+  @page { margin: 28mm 18mm; }
+  * { box-sizing: border-box; }
+  body { font-family: 'Inter', 'Segoe UI', Arial, sans-serif; color:#1e293b; margin:0; padding:36px 40px; font-size:13px; line-height:1.55; }
+  .doc-header { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:3px solid #4f46e5; padding-bottom:18px; margin-bottom:24px; }
+  .doc-header .brand { font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#4f46e5; font-weight:700; margin-bottom:6px; }
+  .doc-header h1 { font-size:22px; margin:0 0 4px; color:#0f172a; }
+  .doc-header .sub { font-size:13px; color:#64748b; }
+  .status-badge { display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:999px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; white-space:nowrap; }
+  .status-badge.ok { background:#dcfce7; color:#15803d; }
+  .status-badge.pending { background:#fef3c7; color:#b45309; }
+
+  .info-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:30px; }
+  .info-box { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; }
+  .info-box .label { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:#94a3b8; font-weight:700; margin-bottom:4px; }
+  .info-box .value { font-size:14px; font-weight:600; color:#0f172a; }
+  .info-box .value.small { font-size:12px; font-weight:500; color:#475569; }
+
+  .section-title { font-size:14px; font-weight:800; color:#0f172a; margin:28px 0 14px; padding-bottom:8px; border-bottom:2px solid #e2e8f0; display:flex; align-items:center; gap:8px; }
+  .section-title::before { content:''; width:5px; height:16px; background:#4f46e5; border-radius:3px; display:inline-block; }
+
+  .qa { padding:12px 0; border-bottom:1px solid #eef1f6; page-break-inside:avoid; }
+  .qa:last-child { border-bottom:none; }
+  .qa-q { font-weight:700; color:#1e293b; font-size:12.5px; margin-bottom:6px; display:flex; gap:8px; }
+  .qa-num { color:#4f46e5; font-weight:800; font-size:11px; }
+  .qa-a { color:#475569; font-size:12.5px; padding-left:24px; }
+  .qa-a .muted { color:#a3aab8; font-style:italic; }
+
+  .sig-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:6px; }
+  .sig-card { display:flex; gap:12px; align-items:flex-start; border-radius:10px; padding:14px; border:1px solid #e2e8f0; page-break-inside:avoid; }
+  .sig-card.sig-ok { background:#f0fdf4; border-color:#bbf7d0; }
+  .sig-card.sig-pending { background:#fffbeb; border-color:#fde68a; }
+  .sig-icon { width:26px; height:26px; min-width:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:800; }
+  .sig-ok .sig-icon { background:#22c55e; color:#fff; }
+  .sig-pending .sig-icon { background:#f59e0b; color:#fff; }
+  .sig-role { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:#94a3b8; font-weight:700; }
+  .sig-name { font-size:13px; font-weight:700; color:#0f172a; margin:2px 0 4px; }
+  .sig-meta { font-size:11px; color:#475569; }
+  .sig-meta.muted { color:#a3892f; font-style:italic; }
+
+  .doc-footer { margin-top:36px; padding-top:14px; border-top:1px solid #e2e8f0; font-size:10.5px; color:#94a3b8; display:flex; justify-content:space-between; }
+  .no-print { margin-top:24px; }
+  .no-print button { background:#4f46e5; color:#fff; border:none; padding:10px 18px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; }
+  @media print { .no-print{ display:none } body{ padding:0; } }
+</style></head>
+<body>
+  <div class="doc-header">
+    <div>
+      <div class="brand">FlowDesk</div>
+      <h1>Passagem de Bastão — Transição para o CS</h1>
+      <div class="sub">${empresa}</div>
+    </div>
+    <span class="status-badge ${bloqueado ? 'ok' : 'pending'}">${bloqueado ? '&#10003; Documento assinado' : '&#9679; Assinaturas pendentes'}</span>
+  </div>
+
+  <div class="info-grid">
+    <div class="info-box"><div class="label">Cliente</div><div class="value">${empresa}</div>${contato ? `<div class="value small">${escapeHTML(contato)}</div>` : ''}</div>
+    <div class="info-box"><div class="label">GP responsável</div><div class="value">${escapeHTML(gp?.nome || '—')}</div></div>
+    <div class="info-box"><div class="label">Data da transição</div><div class="value">${t.dataTransicao ? fmtDate(t.dataTransicao) : '—'}</div></div>
+  </div>
+
+  <div class="section-title">Questionário de passagem de bastão</div>
+  ${perguntasHTML}
+
+  <div class="section-title">Assinaturas</div>
+  <div class="sig-grid">${assinaturasHTML}</div>
+
+  <div class="doc-footer">
+    <span>Documento gerado pelo FlowDesk em ${geradoEm}</span>
+    <span>${bloqueado ? 'Status: assinado por todos os signatários' : 'Status: aguardando assinaturas'}</span>
+  </div>
+
+  <div class="no-print"><button onclick="window.print()">Imprimir / Salvar PDF</button></div>
+</body></html>`;
+
+    const w = window.open('', '_blank');
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => w.print(), 400);
+  }
+};
+
+/* ============ Transição para o CS — regras fixas ============ */
+const TransicaoCS = {
+  PERGUNTAS: [
+    'O que foi vendido e qual era o objetivo principal do cliente?',
+    'O que foi efetivamente entregue?',
+    'O que ficou fora do escopo?',
+    'O que ainda está pendente?',
+    'Existem promessas ou acordos feitos durante a implantação que precisamos conhecer?',
+    'Quais são os principais problemas ou riscos atuais?',
+    'Quais chamados/demandas estão abertos?',
+    'Quais são os processos mais críticos do cliente?',
+    'Quais são as principais customizações e integrações?',
+    'Quem são os principais contatos e decisores?',
+    'Como está o relacionamento com o cliente hoje?',
+    'Existe alguma insatisfação que precisamos tratar?',
+    'Quais oportunidades comerciais foram identificadas durante a implantação?',
+    'Existe alguma particularidade contratual ou condição comercial que precisamos conhecer?',
+    'Qual é a recomendação de Serviços para o time de Base a partir de agora?'
+  ],
+
+  // Assinantes fixos (hardcoded), independentemente da equipe cadastrada.
+  // Os e-mails aqui são só para checagem de UX (mostrar/esconder o botão);
+  // a validação que realmente vale está no backend (src/server/db/api.ts),
+  // então mesmo que alguém edite este JS no navegador não consegue assinar
+  // como outra pessoa — o servidor rejeita pelo e-mail da sessão logada.
+  ASSINANTES: [
+    { key: 'rogerio', label: 'Aprovador', nomeFixo: 'Rogério Furian', email: 'rogerio.sorci@sankhya.com.br' },
+    { key: 'gp',       label: 'GP responsável', nomeFixo: 'GP responsável pela transição' },
+    { key: 'renato',   label: 'Aprovador', nomeFixo: 'Renato Xavier', email: 'renato.xavier@sankhya.com.br' },
+    { key: 'gustavo',  label: 'Aprovador', nomeFixo: 'Gustavo Furian', email: 'gustavo.germano@sankhya.com.br' },
+  ],
+
+  isAssinado(t) {
+    if (!t || !t.assinaturas) return false;
+    return this.ASSINANTES.every(a => !!t.assinaturas[a.key]);
+  },
+
+  // A pessoa logada pode assinar esta key? (checagem de UX; a de verdade é no backend)
+  podeAssinar(t, a) {
+    const user = App.currentUser;
+    if (!user) return false;
+    if (a.key === 'gp') {
+      return !!t.gpId && t.gpId === App.currentUserPessoaId;
+    }
+    return !!(user.email && a.email && user.email.toLowerCase() === a.email.toLowerCase());
+  },
+
+  renderAssinanteRow(t, a) {
+    const s = t.assinaturas?.[a.key];
+    const gp = Store.pessoa(t.gpId);
+    const nomeEsperado = a.key === 'gp' ? (gp?.nome || 'GP responsável') : a.nomeFixo;
+    if (s) {
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:8px;">
+          <i class="fa-solid fa-circle-check" style="color:#10b981;font-size:18px;"></i>
+          <div style="flex:1;">
+            <div style="font-weight:600;">${escapeHTML(a.label)} — ${escapeHTML(nomeEsperado)}</div>
+            <div style="font-size:12px;color:var(--text-2);">Assinado por ${escapeHTML(s.nome)} em ${new Date(s.data).toLocaleString('pt-BR')}</div>
+          </div>
+        </div>`;
+    }
+    const podeAssinar = this.podeAssinar(t, a);
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:8px;flex-wrap:wrap;">
+        <i class="fa-regular fa-circle" style="color:var(--text-2);font-size:18px;"></i>
+        <div style="flex:1;min-width:160px;">
+          <div style="font-weight:600;">${escapeHTML(a.label)} — ${escapeHTML(nomeEsperado)}</div>
+          <div style="font-size:12px;color:var(--text-2);">${podeAssinar ? 'Pendente de assinatura' : 'Só ' + escapeHTML(nomeEsperado) + ' pode assinar aqui'}</div>
+        </div>
+        ${podeAssinar
+          ? `<button class="btn btn-primary" data-assinar="${a.key}"><i class="fa-solid fa-signature"></i> Assinar como ${escapeHTML(App.currentUser?.nome || '')}</button>`
+          : ''}
+      </div>`;
   }
 };
 

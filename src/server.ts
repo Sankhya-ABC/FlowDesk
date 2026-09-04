@@ -3,6 +3,8 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleApi } from "./server/db/api";
+import { handleDocumentosApi } from "./server/documentos/api";
+import { handleGoogleApi } from "./server/google/api";
 import { handleAuthApi } from "./server/auth/api";
 import { getAuthenticatedEquipeId } from "./server/auth/session";
 // `?raw` inlines the HTML at build time — this file is deliberately NOT under
@@ -59,6 +61,18 @@ export default {
       return handleAuthApi(request);
     }
 
+    // NOVO BLOCO
+    if (pathname.startsWith("/api/google/")) {
+      if (!getAuthenticatedEquipeId(request)) {
+        return new Response(JSON.stringify({ error: "Não autenticado" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+        return handleGoogleApi(request);
+        }
+
     if (pathname.startsWith("/api/")) {
       if (!getAuthenticatedEquipeId(request)) {
         return new Response(JSON.stringify({ error: "Não autenticado" }), {
@@ -66,6 +80,18 @@ export default {
           headers: { "content-type": "application/json" },
         });
       }
+
+      // Documentos (upload/download binário e o zip de projeto) tem rotas
+      // próprias — não passa pelo passthrough genérico /api/:col porque não
+      // são registros JSON simples.
+      const isDocumentosRoute =
+        pathname.startsWith("/api/documentos") ||
+        /^\/api\/projetos\/[^/]+\/documentos\.zip$/.test(pathname);
+
+      if (isDocumentosRoute) {
+        return handleDocumentosApi(request);
+      }
+
       return handleApi(request);
     }
 

@@ -28,6 +28,13 @@ const isoDay = (d) => {
   return `${y}-${mo}-${day}`;
 };
 const daysBetween = (a, b) => Math.round((parseLocalDate(b) - parseLocalDate(a)) / 86400000);
+const fmtBytes = (bytes) => {
+  if (!bytes && bytes !== 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let n = Number(bytes), i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+};
 const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const addDays = (d, n) => { const x = parseLocalDate(d); x.setDate(x.getDate()+n); return x; };
 
@@ -56,7 +63,26 @@ const EQUIPE_AREA = {
   cs:              { label:'CS',              color:'#0ea5e9' },
   desenvolvimento: { label:'Dev', color:'#a855f7' },
   consultores:     { label:'Consultores',     color:'#f59e0b' },
+  cliente:         { label:'Cliente',         color:'#10b981' },
 };
+
+// Nome de exibição do Executante: usa o cadastro em equipe quando responsavelId
+// aponta pra alguém interno; senão cai no texto livre (terceiros / contato do cliente).
+function nomeResponsavel(d) {
+  const p = d && d.responsavelId ? Store.pessoa(d.responsavelId) : null;
+  if (p) return p.nome;
+  return (d && d.responsavelNome) ? d.responsavelNome : '';
+}
+
+// Nome de exibição do Projeto de uma demanda: cobre tanto projetos reais
+// quanto as opções especiais "Nova oportunidade" / "Fora do escopo".
+function nomeProjeto(d) {
+  if (!d || !d.projetoId) return '';
+  const especial = PROJETO_ESPECIAIS.find(o => o.value === d.projetoId);
+  if (especial) return especial.label;
+  const p = Store.projeto(d.projetoId);
+  return p ? p.nome : '';
+}
 
 const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
@@ -130,7 +156,7 @@ function parseCSV(text) {
   });
 }
 
-function exportPDF(title, htmlBody) {
+function exportPDF(title, htmlBody, hideHeading=false) {
   const w = window.open('', '_blank');
   w.document.write(`<!DOCTYPE html><html><head><title>${escapeHTML(title)}</title>
   <style>
@@ -141,7 +167,7 @@ function exportPDF(title, htmlBody) {
     th{background:#f5f5f5;}
     @media print { .no-print{ display:none } }
   </style></head><body>
-    <h1>${escapeHTML(title)}</h1>
+    ${hideHeading ? '' : `<h1>${escapeHTML(title)}</h1>`}
     ${htmlBody}
     <p class="no-print" style="margin-top:20px"><button onclick="window.print()">Imprimir / Salvar PDF</button></p>
   </body></html>`);
@@ -157,6 +183,33 @@ const storage = {
   set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
   del(key) { try { localStorage.removeItem(key); } catch {} }
 };
+
+// Aplica máscara de telefone BR conforme o usuário digita: (99) 99999-9999 ou (99) 9999-9999
+function maskPhone(value) {
+  let v = String(value ?? '').replace(/\D/g, '').slice(0, 11);
+  if (v.length > 10) {
+    v = v.replace(/^(\d{2})(\d{5})(\d{0,4}).*/, '($1) $2-$3');
+  } else if (v.length > 5) {
+    v = v.replace(/^(\d{2})(\d{4})(\d{0,4}).*/, '($1) $2-$3');
+  } else if (v.length > 2) {
+    v = v.replace(/^(\d{2})(\d{0,5})/, '($1) $2');
+  } else if (v.length > 0) {
+    v = v.replace(/^(\d{0,2})/, '($1');
+  }
+  return v;
+}
+
+function attachPhoneMask(input) {
+  if (!input) return;
+  input.addEventListener('input', () => {
+    const pos = input.selectionStart;
+    const before = input.value.length;
+    input.value = maskPhone(input.value);
+    const after = input.value.length;
+    const diff = after - before;
+    input.selectionStart = input.selectionEnd = Math.max(0, pos + diff);
+  });
+}
 
 function initials(name='') {
   return name.split(' ').filter(Boolean).slice(0,2).map(p=>p[0]).join('').toUpperCase();
