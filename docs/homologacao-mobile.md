@@ -163,5 +163,3 @@ Versão: Stage 1 (operações locais + envio em lote)
 **Dispositivo:** ___________________
 **Versão Android:** ___________________
 **Aprovado:** [ ] Sim  [ ] Não
-
-Testando aqui.....
