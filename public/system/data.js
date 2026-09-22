@@ -213,6 +213,23 @@ const Store = {
         if (typeof UI !== 'undefined') UI.toast('Falha ao excluir no servidor', 'warn');
       });
   },
+
+  // Versão await-ável usada por ações com "Desfazer" para garantir que a
+  // exclusão no servidor terminou antes de oferecer a restauração.
+  async removeAwait(col, id) {
+    if (this.offline) {
+      Store.state[col] = Store.state[col].filter(x=>x.id!==id);
+      Store.save();
+      return;
+    }
+    const res = await fetch(`/api/${col}/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `delete ${col} failed: ${res.status}`);
+    }
+    Store.state[col] = Store.state[col].filter(x=>x.id!==id);
+    Store.save();
+  },
 };
 
 /* ============ Ordens de Serviço — Store local (frontend v1) ============ */
