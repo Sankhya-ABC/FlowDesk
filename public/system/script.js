@@ -1,3 +1,779 @@
+/* ============ Redimensionamento de tabelas ============ */
+const TableResizer = (() => {
+  const STORAGE_PREFIX = 'flowdesk_table_widths_v5:';
+  const CONFIG_PREFIX = 'flowdesk_table_config_v5:';
+  // Permite que o usuario reduza bastante as colunas sem quebrar a tabela.
+  // Conteudo textual continua podendo quebrar em varias linhas.
+  const MIN_WIDTH = 30;
+  const MAX_AUTO_WIDTH = 720;
+
+  const cleanLabel = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+
+
+  /* ============ Tooltip inteligente para células truncadas ============
+     Mostra o conteúdo completo apenas quando a célula realmente não consegue
+     exibir tudo. Usa delegação de eventos para funcionar também em tabelas
+     renderizadas dinamicamente. */
+  let tableTooltip = null;
+  let tableTooltipTarget = null;
+  let tableTooltipHideTimer = null;
+
+  const ensureTableTooltip = () => {
+    if (tableTooltip && document.body.contains(tableTooltip)) return tableTooltip;
+    tableTooltip = document.createElement('div');
+    tableTooltip.className = 'flowdesk-table-tooltip';
+    tableTooltip.setAttribute('role', 'tooltip');
+    tableTooltip.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(tableTooltip);
+    return tableTooltip;
+  };
+
+  const getTooltipCell = (target) => {
+    const cell = target?.closest?.('td[data-table-tooltip], th[data-table-tooltip]');
+    if (!cell || !cell.closest('table.resizable-table')) return null;
+    if (cell.closest('.row-actions')) return null;
+    return cell;
+  };
+
+  const tooltipTextFromCell = (cell) => {
+    const explicit = cell.dataset.tableTooltip;
+    if (explicit) return cleanLabel(explicit);
+    const clone = cell.cloneNode(true);
+    clone.querySelectorAll('.table-column-menu-trigger, .table-col-resizer, .row-actions').forEach(el => el.remove());
+    const text = cleanLabel(clone.textContent || '');
+    return text || null;
+  };
+
+  const cellIsClipped = (cell) => {
+    if (!cell || cell.offsetParent === null) return false;
+    const rect = cell.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return false;
+
+    // Para células com tooltip explícito (Projeto/Cliente), mede o próprio
+    // elemento de texto. Isso evita depender do scrollWidth do <td>, que pode
+    // não denunciar corretamente a elipse em algumas tabelas com table-layout:fixed.
+    const textNode = cell.querySelector('.table-tooltip-text');
+    if (textNode) {
+      return textNode.scrollWidth > textNode.clientWidth + 1 || textNode.scrollHeight > textNode.clientHeight + 1;
+    }
+
+    return cell.scrollWidth > cell.clientWidth + 1 || cell.scrollHeight > cell.clientHeight + 1;
+  };
+
+  const positionTableTooltip = (cell) => {
+    if (!tableTooltip || !cell) return;
+    const gap = 8;
+    const pad = 10;
+    const rect = cell.getBoundingClientRect();
+    const tooltipRect = tableTooltip.getBoundingClientRect();
+
+    let left = rect.left + rect.width / 2 - tooltipRect.width / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tooltipRect.width - pad));
+
+    let top = rect.bottom + gap;
+    if (top + tooltipRect.height > window.innerHeight - pad) {
+      top = rect.top - tooltipRect.height - gap;
+    }
+    if (top < pad) top = pad;
+
+    tableTooltip.style.left = `${Math.round(left)}px`;
+    tableTooltip.style.top = `${Math.round(top)}px`;
+  };
+
+  const hideTableTooltip = () => {
+    clearTimeout(tableTooltipHideTimer);
+    if (!tableTooltip) return;
+    tableTooltipTarget = null;
+    tableTooltip.classList.remove('is-visible');
+    tableTooltip.setAttribute('aria-hidden', 'true');
+  };
+
+  const showTableTooltip = (cell) => {
+    clearTimeout(tableTooltipHideTimer);
+    const text = tooltipTextFromCell(cell);
+    if (!text || !cellIsClipped(cell)) {
+      hideTableTooltip();
+      return;
+    }
+    const tip = ensureTableTooltip();
+    tableTooltipTarget = cell;
+    tip.textContent = text;
+    tip.setAttribute('aria-hidden', 'false');
+    tip.classList.add('is-visible');
+    // Aguarda o layout para medir a caixa com o texto completo.
+    requestAnimationFrame(() => positionTableTooltip(cell));
+  };
+
+  const initTableTooltips = () => {
+    if (document.documentElement.dataset.tableTooltipsReady === 'true') return;
+    document.documentElement.dataset.tableTooltipsReady = 'true';
+
+    document.addEventListener('pointerover', (event) => {
+      const cell = getTooltipCell(event.target);
+      if (!cell) return;
+      if (event.relatedTarget && cell.contains(event.relatedTarget)) return;
+      showTableTooltip(cell);
+    }, true);
+
+    document.addEventListener('pointerout', (event) => {
+      const cell = getTooltipCell(event.target);
+      if (!cell) return;
+      if (event.relatedTarget && cell.contains(event.relatedTarget)) return;
+      tableTooltipHideTimer = setTimeout(hideTableTooltip, 80);
+    }, true);
+
+    document.addEventListener('pointermove', (event) => {
+      if (!tableTooltipTarget) return;
+      const cell = getTooltipCell(event.target);
+      if (cell !== tableTooltipTarget) {
+        hideTableTooltip();
+        return;
+      }
+      positionTableTooltip(cell);
+    }, { passive:true, capture:true });
+
+    window.addEventListener('scroll', hideTableTooltip, { passive:true, capture:true });
+    window.addEventListener('resize', hideTableTooltip, { passive:true });
+    document.addEventListener('visibilitychange', hideTableTooltip);
+  };
+
+  const getKey = (table) => {
+    const explicit = table.dataset.resizeKey;
+    if (explicit) return explicit;
+    const page = cleanLabel(document.querySelector('#view-root .page-title')?.textContent || 'view');
+    const headers = Array.from(table.querySelectorAll('thead th')).map(th => cleanLabel(th.textContent));
+    const className = cleanLabel(table.className);
+    return `${location.pathname}:${page}:${className}:${headers.join('|')}`;
+  };
+
+  const loadWidths = (key) => {
+    try {
+      const raw = localStorage.getItem(STORAGE_PREFIX + key);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch { return {}; }
+  };
+
+  const saveWidths = (key, widths) => {
+    try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(widths)); } catch {}
+  };
+
+  const loadConfig = (key) => {
+    try {
+      const raw = localStorage.getItem(CONFIG_PREFIX + key);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch { return {}; }
+  };
+
+  const saveConfig = (key, config) => {
+    try { localStorage.setItem(CONFIG_PREFIX + key, JSON.stringify(config)); } catch {}
+  };
+
+  const setColumnWidth = (table, index, width) => {
+    const cols = table.querySelectorAll('col');
+    if (!cols[index]) return;
+    const safe = Math.max(MIN_WIDTH, Math.round(width));
+    cols[index].style.width = `${safe}px`;
+    // Não espelha a largura em min-width: isso fazia o conteúdo da célula
+    // voltar a impor uma largura mínima e travar o encolhimento da coluna.
+    cols[index].style.minWidth = '0px';
+  };
+
+  const currentWidth = (table, index) => {
+    const cols = table.querySelectorAll('col');
+    if (cols[index]?.style.width) return parseFloat(cols[index].style.width) || 0;
+    const th = table.querySelectorAll('thead th')[index];
+    return th ? th.getBoundingClientRect().width : 0;
+  };
+
+  const measureNode = (node) => {
+    const probe = document.createElement('div');
+    const cs = getComputedStyle(node);
+    Object.assign(probe.style, {
+      position:'fixed', left:'-10000px', top:'0', visibility:'hidden',
+      whiteSpace:'nowrap', width:'max-content', maxWidth:'none',
+      font:cs.font, fontFamily:cs.fontFamily, fontSize:cs.fontSize,
+      fontWeight:cs.fontWeight, letterSpacing:cs.letterSpacing, lineHeight:cs.lineHeight
+    });
+    probe.innerHTML = node.innerHTML;
+    document.body.appendChild(probe);
+    const width = probe.getBoundingClientRect().width;
+    probe.remove();
+    return width;
+  };
+
+  const autoFit = (table, index) => {
+    const cells = [
+      ...Array.from(table.querySelectorAll(`thead th:nth-child(${index + 1})`)),
+      ...Array.from(table.querySelectorAll(`tbody tr:not(.is-empty-row) td:nth-child(${index + 1})`))
+    ];
+    let max = 0;
+    cells.slice(0, 200).forEach(cell => { max = Math.max(max, measureNode(cell)); });
+    const th = table.querySelectorAll('thead th')[index];
+    if (th) max = Math.max(max, measureNode(th));
+    const cs = th ? getComputedStyle(th) : null;
+    const pad = cs ? parseFloat(cs.paddingLeft || 0) + parseFloat(cs.paddingRight || 0) : 28;
+    const target = Math.min(MAX_AUTO_WIDTH, Math.max(MIN_WIDTH, Math.ceil(max + pad + 10)));
+    setColumnWidth(table, index, target);
+    return target;
+  };
+
+  const persistColumn = (table, index) => {
+    const key = getKey(table);
+    const widths = loadWidths(key);
+    widths[index] = Math.round(currentWidth(table, index));
+    saveWidths(key, widths);
+  };
+
+  const getConfig = (table) => loadConfig(getKey(table));
+
+  const persistConfig = (table, patch) => {
+    const key = getKey(table);
+    const config = { ...loadConfig(key), ...patch };
+    saveConfig(key, config);
+    return config;
+  };
+
+  const isHidden = (table, index) => getConfig(table).hidden?.includes(index);
+
+  const visibleIndices = (table) => Array.from(table.querySelectorAll('thead th'))
+    .map((_, index) => index)
+    .filter(index => !isHidden(table, index));
+
+  const applyHiddenColumns = (table) => {
+    const config = getConfig(table);
+    const hidden = new Set(Array.isArray(config.hidden) ? config.hidden.map(Number) : []);
+    const headers = table.querySelectorAll('thead th');
+    headers.forEach((th, index) => {
+      const hiddenCol = hidden.has(index);
+      th.classList.toggle('table-column-hidden', hiddenCol);
+      table.querySelectorAll(`tbody tr td:nth-child(${index + 1})`).forEach(td => td.classList.toggle('table-column-hidden', hiddenCol));
+      const col = table.querySelector(`colgroup col:nth-child(${index + 1})`);
+      if (col) col.classList.toggle('table-column-hidden', hiddenCol);
+    });
+    return hidden;
+  };
+
+  const applyPinnedColumns = (table) => {
+    const config = getConfig(table);
+    const pinned = new Set(Array.isArray(config.pinned) ? config.pinned.map(Number) : []);
+    const headers = Array.from(table.querySelectorAll('thead th'));
+    let left = 0;
+    headers.forEach((th, index) => {
+      const shouldPin = pinned.has(index) && !isHidden(table, index);
+      table.querySelectorAll(`tbody tr td:nth-child(${index + 1})`).forEach(td => {
+        td.classList.toggle('table-column-pinned', shouldPin);
+        td.style.left = shouldPin ? `${left}px` : '';
+      });
+      th.classList.toggle('table-column-pinned', shouldPin);
+      th.style.left = shouldPin ? `${left}px` : '';
+      if (shouldPin) {
+        left += th.getBoundingClientRect().width;
+      }
+    });
+  };
+
+  const applyColumnState = (table) => {
+    applyHiddenColumns(table);
+    requestAnimationFrame(() => applyPinnedColumns(table));
+  };
+
+  const sortDomRows = (table, index, direction) => {
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll(':scope > tr'));
+    const dataRows = rows.filter(row => !row.classList.contains('is-empty-row') && row.children.length === table.querySelectorAll('thead th').length);
+    if (dataRows.length < 2) return;
+    const collator = new Intl.Collator('pt-BR', { numeric:true, sensitivity:'base' });
+    dataRows.sort((a, b) => {
+      const av = a.children[index]?.textContent?.replace(/\s+/g, ' ').trim() || '';
+      const bv = b.children[index]?.textContent?.replace(/\s+/g, ' ').trim() || '';
+      return collator.compare(av, bv) * direction;
+    });
+    dataRows.forEach(row => tbody.appendChild(row));
+    table.dataset.domSortIndex = String(index);
+    table.dataset.domSortDirection = String(direction);
+  };
+
+  const closeMenu = () => {
+    document.querySelectorAll('.table-column-menu-trigger[aria-expanded=\"true\"], .table-columns-trigger[aria-expanded=\"true\"], .row-action-more[aria-expanded=\"true\"]').forEach(btn => btn.setAttribute('aria-expanded','false'));
+    document.querySelectorAll('.table-column-menu.is-open, .table-row-actions-menu.is-open').forEach(menu => menu.remove());
+  };
+
+  const clearWidths = (table) => {
+    table.querySelectorAll('colgroup col').forEach(col => {
+      col.style.width = '';
+      col.style.minWidth = '';
+    });
+    try { localStorage.removeItem(STORAGE_PREFIX + getKey(table)); } catch {}
+  };
+
+  const autoFitAll = (table) => {
+    visibleIndices(table).forEach(index => {
+      autoFit(table, index);
+      persistColumn(table, index);
+    });
+    applyPinnedColumns(table);
+  };
+
+  const restoreDefault = (table) => {
+    clearWidths(table);
+    try { localStorage.removeItem(CONFIG_PREFIX + getKey(table)); } catch {}
+    table.querySelectorAll('colgroup col').forEach(col => {
+      col.classList.remove('table-column-hidden');
+    });
+    table.querySelectorAll('th, td').forEach(cell => {
+      cell.classList.remove('table-column-hidden', 'table-column-pinned');
+      cell.style.left = '';
+    });
+    applyColumnState(table);
+  };
+
+  const positionMenu = (menu, th) => {
+    const r = th.getBoundingClientRect();
+    menu.style.left = `${Math.min(window.innerWidth - 280, Math.max(8, r.right - 276))}px`;
+    menu.style.top = `${Math.min(window.innerHeight - 24, r.bottom + 6)}px`;
+  };
+
+  const updateScrollUI = (wrapper) => {
+    if (!wrapper) return;
+    const maxScrollLeft = Math.max(0, wrapper.scrollWidth - wrapper.clientWidth);
+    const hasScroll = maxScrollLeft > 2;
+    const atStart = wrapper.scrollLeft <= 2;
+    const atEnd = wrapper.scrollLeft >= maxScrollLeft - 2;
+
+    wrapper.classList.toggle('has-horizontal-scroll', hasScroll);
+    wrapper.classList.toggle('can-scroll-left', hasScroll && !atStart);
+    wrapper.classList.toggle('can-scroll-right', hasScroll && !atEnd);
+
+    const hint = wrapper.parentElement?.querySelector(':scope > .table-column-toolbar .table-scroll-hint');
+    if (hint) {
+      hint.hidden = !hasScroll;
+      hint.classList.toggle('is-end', !atEnd);
+      hint.setAttribute('aria-hidden', String(!hasScroll));
+      hint.title = hasScroll ? (atStart ? 'Arraste a barra horizontal para ver mais colunas' : atEnd ? 'Você chegou ao final da tabela' : 'Há mais colunas para os lados') : '';
+    }
+  };
+
+  const menuButton = (label, icon, onClick, options = {}) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'table-menu-item' + (options.danger ? ' is-danger' : '');
+    if (options.disabled) btn.disabled = true;
+    btn.innerHTML = `<i class="fa-solid fa-${icon}"></i><span>${escapeHTML(label)}</span>`;
+    btn.onclick = (event) => { event.preventDefault(); event.stopPropagation(); onClick(); };
+    return btn;
+  };
+
+  const openMenu = (table, th, index, anchor) => {
+    closeMenu();
+    const menu = document.createElement('div');
+    menu.className = 'table-column-menu is-open';
+    menu.setAttribute('role', 'menu');
+
+    const title = document.createElement('div');
+    title.className = 'table-menu-title';
+    title.innerHTML = `<span>${escapeHTML(cleanLabel(th.textContent) || `Coluna ${index + 1}`)}</span>`;
+    menu.appendChild(title);
+
+    const hasAppSort = !!th.dataset.sort;
+    menu.appendChild(menuButton('Ordenar A → Z', 'arrow-down-a-z', () => {
+      if (hasAppSort) {
+        App.sort.col = th.dataset.sort;
+        App.sort.dir = -1; // o click existente alterna para ascendente
+        th.click();
+      } else sortDomRows(table, index, 1);
+      closeMenu();
+    }));
+    menu.appendChild(menuButton('Ordenar Z → A', 'arrow-up-z-a', () => {
+      if (hasAppSort) {
+        App.sort.col = th.dataset.sort;
+        App.sort.dir = 1; // o click existente alterna para descendente
+        th.click();
+      } else sortDomRows(table, index, -1);
+      closeMenu();
+    }));
+
+    const divider = document.createElement('div');
+    divider.className = 'table-menu-divider';
+    menu.appendChild(divider);
+
+    menu.appendChild(menuButton('Ajustar largura', 'left-right', () => {
+      autoFit(table, index);
+      persistColumn(table, index);
+      applyPinnedColumns(table);
+      closeMenu();
+    }));
+    menu.appendChild(menuButton('Ajustar todas as colunas', 'arrows-left-right', () => {
+      autoFitAll(table);
+      closeMenu();
+    }));
+
+    const pinned = new Set((getConfig(table).pinned || []).map(Number));
+    menu.appendChild(menuButton(pinned.has(index) ? 'Desafixar coluna' : 'Fixar coluna', pinned.has(index) ? 'thumbtack-slash' : 'thumbtack', () => {
+      const next = new Set((getConfig(table).pinned || []).map(Number));
+      if (next.has(index)) next.delete(index); else next.add(index);
+      persistConfig(table, { pinned: Array.from(next).sort((a,b)=>a-b) });
+      applyPinnedColumns(table);
+      closeMenu();
+    }));
+
+    const visibleCount = visibleIndices(table).length;
+    menu.appendChild(menuButton('Ocultar coluna', 'eye-slash', () => {
+      if (visibleCount <= 1) return;
+      const nextHidden = new Set((getConfig(table).hidden || []).map(Number));
+      nextHidden.add(index);
+      const nextPinned = new Set((getConfig(table).pinned || []).map(Number));
+      nextPinned.delete(index);
+      persistConfig(table, { hidden: Array.from(nextHidden).sort((a,b)=>a-b), pinned: Array.from(nextPinned).sort((a,b)=>a-b) });
+      applyColumnState(table);
+      closeMenu();
+    }, { disabled: visibleCount <= 1 }));
+
+    const hidden = (getConfig(table).hidden || []).map(Number);
+    if (hidden.length) {
+      const divider2 = document.createElement('div');
+      divider2.className = 'table-menu-divider';
+      menu.appendChild(divider2);
+      menu.appendChild(menuButton('Mostrar todas as colunas', 'eye', () => {
+        persistConfig(table, { hidden: [] });
+        applyColumnState(table);
+        closeMenu();
+      }));
+    }
+
+    document.body.appendChild(menu);
+    positionMenu(menu, th);
+    anchor.setAttribute('aria-expanded', 'true');
+    setTimeout(() => {
+      const onOutside = (event) => {
+        if (!menu.contains(event.target) && event.target !== anchor) { closeMenu(); document.removeEventListener('pointerdown', onOutside, true); anchor.setAttribute('aria-expanded', 'false'); }
+      };
+      document.addEventListener('pointerdown', onOutside, true);
+    }, 0);
+    const reposition = () => { if (document.body.contains(menu)) positionMenu(menu, th); };
+    window.addEventListener('resize', reposition, { once:true });
+  };
+
+  const positionRowActionsMenu = (menu, anchor) => {
+    const r = anchor.getBoundingClientRect();
+    const menuWidth = 206;
+    const margin = 8;
+    const preferredLeft = r.right - menuWidth;
+    const left = Math.min(window.innerWidth - menuWidth - margin, Math.max(margin, preferredLeft));
+    const menuHeight = menu.offsetHeight || 126;
+    const below = r.bottom + 6;
+    const above = r.top - menuHeight - 6;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${below + menuHeight <= window.innerHeight - margin ? below : Math.max(margin, above)}px`;
+  };
+
+  const openRowActionsMenu = (anchor, id) => {
+    closeMenu();
+    const menu = document.createElement('div');
+    menu.className = 'table-row-actions-menu is-open';
+    menu.setAttribute('role', 'menu');
+
+    const title = document.createElement('div');
+    title.className = 'table-menu-title';
+    title.innerHTML = '<span>Ações da demanda</span>';
+    menu.appendChild(title);
+
+    menu.appendChild(menuButton('Duplicar', 'copy', () => {
+      App.dupDemanda(id);
+      closeMenu();
+    }));
+    menu.appendChild(menuButton('Excluir', 'trash', () => {
+      App.delDemanda(id);
+      closeMenu();
+    }, { danger:true }));
+
+    document.body.appendChild(menu);
+    positionRowActionsMenu(menu, anchor);
+    anchor.setAttribute('aria-expanded', 'true');
+
+    const onOutside = (event) => {
+      if (!menu.contains(event.target) && event.target !== anchor) {
+        closeMenu();
+        document.removeEventListener('pointerdown', onOutside, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', onOutside, true), 0);
+
+    const scrollViewport = anchor.closest('.table-scroll-viewport');
+    const onScroll = () => closeMenu();
+    scrollViewport?.addEventListener('scroll', onScroll, { passive:true, once:true });
+
+    const reposition = () => { if (document.body.contains(menu)) positionRowActionsMenu(menu, anchor); };
+    window.addEventListener('resize', reposition);
+    menu._flowdeskRepositionCleanup = () => window.removeEventListener('resize', reposition);
+  };
+
+  const openColumnsMenu = (table, anchor) => {
+    closeMenu();
+    const menu = document.createElement('div');
+    menu.className = 'table-column-menu is-open table-columns-menu';
+    menu.setAttribute('role', 'menu');
+
+    const title = document.createElement('div');
+    title.className = 'table-menu-title';
+    title.innerHTML = '<span>Colunas</span>';
+    menu.appendChild(title);
+
+    const headers = Array.from(table.querySelectorAll('thead th'));
+    const config = getConfig(table);
+    const hidden = new Set((config.hidden || []).map(Number));
+
+    const columnList = document.createElement('div');
+    columnList.className = 'table-columns-list';
+
+    headers.forEach((th, index) => {
+      const label = cleanLabel(th.dataset.label || th.textContent.replace('⋮','')) || `Coluna ${index + 1}`;
+      const row = document.createElement('label');
+      row.className = 'table-column-check';
+      row.setAttribute('role', 'menuitemcheckbox');
+      row.setAttribute('aria-checked', String(!hidden.has(index)));
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = !hidden.has(index);
+      checkbox.disabled = !checkbox.checked && visibleIndices(table).length <= 1;
+      checkbox.addEventListener('change', () => {
+        const nextHidden = new Set((getConfig(table).hidden || []).map(Number));
+        if (checkbox.checked) {
+          nextHidden.delete(index);
+        } else {
+          if (visibleIndices(table).length <= 1) { checkbox.checked = true; return; }
+          nextHidden.add(index);
+          const nextPinned = new Set((getConfig(table).pinned || []).map(Number));
+          nextPinned.delete(index);
+          persistConfig(table, { pinned: Array.from(nextPinned).sort((a,b)=>a-b) });
+        }
+        persistConfig(table, { hidden: Array.from(nextHidden).sort((a,b)=>a-b) });
+        applyColumnState(table);
+        row.setAttribute('aria-checked', String(checkbox.checked));
+        // Mantém o checkbox da própria linha bloqueado somente quando seria a última coluna visível.
+        columnList.querySelectorAll('input[type=checkbox]').forEach(input => {
+          input.disabled = !input.checked && visibleIndices(table).length <= 1;
+        });
+      });
+
+      const text = document.createElement('span');
+      text.textContent = label;
+      row.append(checkbox, text);
+      columnList.appendChild(row);
+    });
+
+    menu.appendChild(columnList);
+    const divider = document.createElement('div');
+    divider.className = 'table-menu-divider';
+    menu.appendChild(divider);
+    menu.appendChild(menuButton('Ajustar automaticamente', 'wand-magic-sparkles', () => {
+      autoFitAll(table);
+      closeMenu();
+    }));
+    menu.appendChild(menuButton('Restaurar padrão', 'rotate-left', () => {
+      restoreDefault(table);
+      closeMenu();
+    }));
+
+    document.body.appendChild(menu);
+    positionMenu(menu, anchor);
+    anchor.setAttribute('aria-expanded', 'true');
+
+    setTimeout(() => {
+      const onOutside = (event) => {
+        if (!menu.contains(event.target) && event.target !== anchor) {
+          closeMenu();
+          document.removeEventListener('pointerdown', onOutside, true);
+        }
+      };
+      document.addEventListener('pointerdown', onOutside, true);
+    }, 0);
+
+    const reposition = () => { if (document.body.contains(menu)) positionMenu(menu, anchor); };
+    window.addEventListener('resize', reposition, { once:true });
+  };
+
+  const setup = (table) => {
+    if (!(table instanceof HTMLTableElement) || table.dataset.tableResizeReady === 'true') return;
+    const headers = table.querySelectorAll('thead th');
+    if (!headers.length) return;
+
+    table.classList.add('resizable-table');
+    table.dataset.tableResizeReady = 'true';
+
+    const colgroup = document.createElement('colgroup');
+    for (let i=0; i<headers.length; i++) {
+      const col = document.createElement('col');
+      col.dataset.colIndex = String(i);
+      colgroup.appendChild(col);
+    }
+    table.prepend(colgroup);
+
+    const wrapper = table.parentElement;
+    if (wrapper) {
+      // Mantém a barra de gerenciamento fora do scroll horizontal e cria um
+      // viewport exclusivo para a tabela. Isso evita que linhas apareçam por
+      // trás da barra durante o scroll vertical/horizontal combinado.
+      let scrollViewport = wrapper.querySelector(':scope > .table-scroll-viewport');
+      if (!scrollViewport) {
+        scrollViewport = document.createElement('div');
+        scrollViewport.className = 'table-scroll-viewport';
+        wrapper.insertBefore(scrollViewport, table);
+        scrollViewport.appendChild(table);
+      }
+
+      if (wrapper.querySelector(':scope > .table-column-toolbar') == null) {
+        const toolbar = document.createElement('div');
+        toolbar.className = 'table-column-toolbar';
+        const label = document.createElement('span');
+        label.className = 'table-column-toolbar-label';
+        label.textContent = 'Gerenciar tabela';
+        const scrollHint = document.createElement('span');
+        scrollHint.className = 'table-scroll-hint';
+        scrollHint.hidden = true;
+        scrollHint.setAttribute('aria-hidden', 'true');
+        scrollHint.innerHTML = '<i class="fa-solid fa-arrows-left-right"></i><span>Role para o lado</span>';
+        const spacer = document.createElement('span');
+        spacer.className = 'table-column-toolbar-spacer';
+        const columnsTrigger = document.createElement('button');
+        columnsTrigger.type = 'button';
+        columnsTrigger.className = 'table-columns-trigger';
+        columnsTrigger.innerHTML = '<i class=\"fa-solid fa-gear\"></i><span>Colunas</span>';
+        columnsTrigger.setAttribute('aria-haspopup','menu');
+        columnsTrigger.setAttribute('aria-expanded','false');
+        columnsTrigger.title = 'Configurar colunas';
+        columnsTrigger.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openColumnsMenu(table, columnsTrigger);
+        };
+        toolbar.append(label, scrollHint, spacer, columnsTrigger);
+        wrapper.insertBefore(toolbar, scrollViewport);
+      }
+
+      const saved = loadWidths(getKey(table));
+      Object.entries(saved).forEach(([index, width]) => setColumnWidth(table, Number(index), Number(width)));
+      applyColumnState(table);
+
+      const onScroll = () => updateScrollUI(scrollViewport);
+      scrollViewport.addEventListener('scroll', onScroll, { passive:true });
+      window.addEventListener('resize', onScroll, { passive:true });
+      if (typeof ResizeObserver !== 'undefined') {
+        const resizeObserver = new ResizeObserver(onScroll);
+        resizeObserver.observe(scrollViewport);
+        resizeObserver.observe(table);
+        table._flowdeskTableResizeObserver = resizeObserver;
+      }
+      table._flowdeskTableScrollCleanup = () => {
+        scrollViewport.removeEventListener('scroll', onScroll);
+        window.removeEventListener('resize', onScroll);
+        table._flowdeskTableResizeObserver?.disconnect();
+      };
+      requestAnimationFrame(() => updateScrollUI(scrollViewport));
+    }
+
+    headers.forEach((th, index) => {
+      const skipMenu = th.dataset.noMenu === 'true';
+      const skipResize = th.dataset.noResize === 'true';
+
+      if (!skipMenu) {
+        const menuTrigger = document.createElement('button');
+        menuTrigger.type = 'button';
+        menuTrigger.className = 'table-column-menu-trigger';
+        menuTrigger.innerHTML = '<i class="fa-solid fa-ellipsis-vertical"></i>';
+        menuTrigger.setAttribute('aria-label', `Opções da coluna ${cleanLabel(th.textContent) || index + 1}`);
+        menuTrigger.setAttribute('aria-haspopup', 'menu');
+        menuTrigger.setAttribute('aria-expanded', 'false');
+        menuTrigger.title = 'Opções da coluna';
+        menuTrigger.onclick = (event) => { event.preventDefault(); event.stopPropagation(); openMenu(table, th, index, menuTrigger); };
+        th.appendChild(menuTrigger);
+      }
+
+      if (skipResize) return;
+
+      const handle = document.createElement('span');
+      handle.className = 'table-col-resizer';
+      handle.setAttribute('role', 'separator');
+      handle.setAttribute('aria-orientation', 'vertical');
+      handle.setAttribute('aria-label', `Redimensionar coluna ${cleanLabel(th.textContent) || index + 1}`);
+      handle.title = 'Arraste para redimensionar • Duplo clique para ajustar automaticamente';
+      handle.tabIndex = 0;
+
+      handle.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        table.classList.add('resizing-columns');
+        const startX = event.clientX;
+        const startWidth = currentWidth(table, index);
+
+        const onMove = (moveEvent) => {
+          setColumnWidth(table, index, Math.max(MIN_WIDTH, startWidth + moveEvent.clientX - startX));
+        };
+        const onUp = () => {
+          table.classList.remove('resizing-columns');
+          persistColumn(table, index);
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', onUp);
+          document.removeEventListener('pointercancel', onUp);
+        };
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onUp);
+      });
+
+      handle.addEventListener('click', e => e.stopPropagation());
+      handle.addEventListener('dblclick', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        autoFit(table, index);
+        persistColumn(table, index);
+      });
+      handle.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          autoFit(table, index);
+          persistColumn(table, index);
+        }
+      });
+
+      th.appendChild(handle);
+    });
+  };
+
+  const refresh = (root = document) => root.querySelectorAll?.('table').forEach(setup);
+
+  const updateStickyTop = () => {
+    const topbar = document.querySelector('.topbar');
+    if (!topbar) return;
+    const height = Math.ceil(topbar.getBoundingClientRect().height);
+    document.documentElement.style.setProperty('--table-sticky-top', `${height}px`);
+  };
+
+  const init = () => {
+    initTableTooltips();
+    updateStickyTop();
+    window.addEventListener('resize', updateStickyTop, { passive:true });
+    refresh(document);
+    const observer = new MutationObserver(mutations => {
+      mutations.forEach(mutation => mutation.addedNodes.forEach(node => {
+        if (!(node instanceof Element)) return;
+        if (node.matches('table')) setup(node);
+        node.querySelectorAll?.('table').forEach(setup);
+      }));
+    });
+    observer.observe(document.body, { childList:true, subtree:true });
+  };
+
+  // Exposto para as tabelas renderizadas pelo App usarem o mesmo menu de ações.
+  const api = { init, refresh, setup, autoFit, openRowActionsMenu };
+  // Compatibilidade com código legado e integração com o FlowTable universal.
+  window.TableResizer = api;
+  return api;
+})();
+
 /* ============ FlowDesk — App Controller ============ */
 
 const App = {
@@ -16,6 +792,183 @@ const App = {
   cliente360CalDate: new Date(),
   sort: { col:null, dir:1 },
   charts: {},
+  selectedDemandas: new Set(),
+  demandasFiltersOpen: false,
+  demandasSavedFiltersModalOpen: false,
+
+  getDemandasSavedFiltersKey() {
+    const userKey = this.currentUser?.email || this.currentUser?.id || 'local';
+    return `flowdesk:demandas:saved-filters:${encodeURIComponent(String(userKey).toLowerCase())}`;
+  },
+
+  getDemandasSavedFilters() {
+    try {
+      const raw = localStorage.getItem(this.getDemandasSavedFiltersKey());
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter(item => item && item.name && item.filters) : [];
+    } catch {
+      return [];
+    }
+  },
+
+  setDemandasSavedFilters(filters) {
+    try {
+      localStorage.setItem(this.getDemandasSavedFiltersKey(), JSON.stringify(filters));
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  describeDemandasFilterSet(filterSet) {
+    const labels = [];
+    const f = filterSet || {};
+    if (f.q) labels.push(`Busca: ${f.q}`);
+    if (f.status) {
+      const statusLabels = { __em_andamento:'Em andamento', atrasado:'Atrasadas', __pendencias:'Pendências' };
+      labels.push(`Status: ${statusLabels[f.status] || STATUS[f.status]?.label || f.status}`);
+    }
+    if (f.projeto) labels.push(`Projeto: ${Store.projeto(f.projeto)?.nome || f.projeto}`);
+    if (f.cliente) labels.push(`Cliente: ${f.cliente}`);
+    if (f.responsavel) labels.push(`Responsável: ${Store.pessoa(f.responsavel)?.nome || f.responsavel}`);
+    if (f.prioridade) labels.push(`Prioridade: ${PRIORIDADE[f.prioridade]?.label || f.prioridade}`);
+    if (f.id) labels.push(`ID: #${f.id}`);
+    if (f.equipe) labels.push(`Equipe: ${EQUIPE_AREA[f.equipe]?.label || f.equipe}`);
+    if (f.data) labels.push(`Prazo: ${fmtDate(f.data)}`);
+    return labels;
+  },
+
+  currentDemandasFilterHasValues() {
+    const f = this.filters.demandas;
+    return ['id','q','cliente','projeto','responsavel','equipe','status','prioridade','data']
+      .some(key => String(f[key] || '').trim());
+  },
+
+  openSaveDemandasFilterModal() {
+    if (!this.currentDemandasFilterHasValues()) {
+      UI.toast('Aplique pelo menos um filtro antes de salvar.', 'warn');
+      return;
+    }
+    const current = { ...this.filters.demandas };
+    const existing = this.getDemandasSavedFilters();
+    const summary = this.describeDemandasFilterSet(current);
+
+    UI.modal({
+      title: 'Salvar filtro',
+      size: 'sm',
+      body: `
+        <div class="saved-filter-save-form">
+          <label class="field-label" for="demandasSavedFilterName">Nome do filtro</label>
+          <input id="demandasSavedFilterName" class="field-input" maxlength="60" placeholder="Ex.: Demandas atrasadas" autocomplete="off" />
+          <div class="saved-filter-preview">${summary.map(text => `<span class="saved-filter-chip">${escapeHTML(text)}</span>`).join('')}</div>
+          <div class="saved-filter-hint">O filtro será salvo apenas para o seu usuário neste navegador.</div>
+        </div>`,
+      footer: '<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="demandasSaveFilterConfirm"><i class="fa-solid fa-bookmark"></i> Salvar filtro</button>',
+      onOpen: (root, close) => {
+        const input = root.querySelector('#demandasSavedFilterName');
+        const submit = () => {
+          const name = String(input?.value || '').trim();
+          if (!name) { input?.focus(); UI.toast('Informe um nome para o filtro.', 'warn'); return; }
+          const normalized = name.toLowerCase();
+          const next = [...existing];
+          const existingIndex = next.findIndex(item => String(item.name || '').trim().toLowerCase() === normalized);
+          const record = {
+            id: existingIndex >= 0 ? next[existingIndex].id : `df_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+            name,
+            filters: current,
+            updatedAt: new Date().toISOString()
+          };
+          if (existingIndex >= 0) next[existingIndex] = record;
+          else next.unshift(record);
+          if (!this.setDemandasSavedFilters(next)) {
+            UI.toast('Não foi possível salvar o filtro neste navegador.', 'error');
+            return;
+          }
+          close();
+          UI.toast(existingIndex >= 0 ? 'Filtro atualizado.' : 'Filtro salvo.');
+          this.render();
+        };
+        root.querySelector('[data-close-modal]').onclick = close;
+        root.querySelector('#demandasSaveFilterConfirm').onclick = submit;
+        input?.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+        setTimeout(() => input?.focus(), 0);
+      }
+    });
+  },
+
+  openDemandasSavedFiltersModal() {
+    const filters = this.getDemandasSavedFilters();
+    UI.modal({
+      title: 'Meus filtros',
+      size: 'lg',
+      body: `
+        <div class="saved-filters-modal-head">
+          <div>
+            <strong>Filtros salvos</strong>
+            <span>Carregue uma consulta salva ou remova as que não usa mais.</span>
+          </div>
+          <button class="btn btn-sm btn-primary" id="demandasSaveCurrentFromList"><i class="fa-solid fa-bookmark"></i> Salvar atual</button>
+        </div>
+        <div class="saved-filters-list" id="demandasSavedFiltersList">
+          ${filters.length ? filters.map(item => {
+            const summary = this.describeDemandasFilterSet(item.filters);
+            return `<div class="saved-filter-row" data-saved-filter-id="${escapeHTML(item.id)}">
+              <div class="saved-filter-row-main">
+                <div class="saved-filter-row-title"><i class="fa-regular fa-bookmark"></i><strong>${escapeHTML(item.name)}</strong></div>
+                <div class="saved-filter-row-summary">${summary.length ? summary.slice(0, 4).map(text => `<span class="saved-filter-chip">${escapeHTML(text)}</span>`).join('') : '<span>Nenhum critério</span>'}${summary.length > 4 ? `<span class="saved-filter-chip">+${summary.length - 4}</span>` : ''}</div>
+                <div class="saved-filter-row-date">${item.updatedAt ? `Atualizado em ${fmtDate(item.updatedAt)}` : ''}</div>
+              </div>
+              <div class="saved-filter-row-actions">
+                <button class="btn btn-sm btn-primary" data-saved-action="load" data-id="${escapeHTML(item.id)}"><i class="fa-solid fa-folder-open"></i> Carregar</button>
+                <button class="icon-btn" data-saved-action="delete" data-id="${escapeHTML(item.id)}" title="Excluir filtro"><i class="fa-solid fa-trash"></i></button>
+              </div>
+            </div>`;
+          }).join('') : `<div class="saved-filters-empty">${UI.emptyState('bookmark','Você ainda não salvou nenhum filtro.')}</div>`}
+        </div>`,
+      footer: '<button class="btn" data-close-modal>Fechar</button>',
+      onOpen: (root, close) => {
+        root.querySelector('[data-close-modal]').onclick = close;
+        root.querySelector('#demandasSaveCurrentFromList')?.addEventListener('click', () => {
+          close();
+          this.openSaveDemandasFilterModal();
+        });
+        root.querySelectorAll('[data-saved-action="load"]').forEach(button => {
+          button.onclick = () => {
+            const item = this.getDemandasSavedFilters().find(saved => saved.id === button.dataset.id);
+            if (!item) {
+              UI.toast('Esse filtro não está mais disponível.', 'error');
+              return;
+            }
+            Object.assign(this.filters.demandas, {
+              id:'', q:'', cliente:'', projeto:'', responsavel:'', equipe:'', status:'', prioridade:'', data:'',
+              ...item.filters
+            });
+            this.demandasFiltersOpen = Boolean(item.filters.id || item.filters.equipe || item.filters.data);
+            this.selectedDemandas.clear();
+            close();
+            this.render();
+            UI.toast(`Filtro “${item.name}” carregado.`);
+          };
+        });
+        root.querySelectorAll('[data-saved-action="delete"]').forEach(button => {
+          button.onclick = () => {
+            const current = this.getDemandasSavedFilters();
+            const item = current.find(saved => saved.id === button.dataset.id);
+            if (!item) return;
+            if (!window.confirm(`Excluir o filtro “${item.name}”?`)) return;
+            const next = current.filter(saved => saved.id !== button.dataset.id);
+            this.setDemandasSavedFilters(next);
+            button.closest('.saved-filter-row')?.remove();
+            if (!next.length) {
+              const list = root.querySelector('#demandasSavedFiltersList');
+              if (list) list.innerHTML = `<div class="saved-filters-empty">${UI.emptyState('bookmark','Você ainda não salvou nenhum filtro.')}</div>`;
+            }
+            UI.toast(`Filtro “${item.name}” excluído.`);
+          };
+        });
+      }
+    });
+  },
 
   // Cores de texto/grade dos gráficos conforme o tema ativo. Usado em todo lugar que
   // cria um Chart.js (Dashboard e Timeline), pra não depender só de Chart.defaults
@@ -70,28 +1023,12 @@ const App = {
     $('#quickAdd').onclick = () => this.openDemandaModal();
     $('#themeToggle').onclick = () => this.toggleTheme();
     $('#menuToggle').onclick = () => this.toggleSidebar();
-    this.addSidebarCloseButton();
     $('#globalSearch').addEventListener('input', debounce(e => this.globalSearch(e.target.value), 200));
     $('#notifBtn').onclick = () => this.toggleNotifs();
     $('#logoutBtn').onclick = async () => {
       try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
       window.location.href = '/login.html';
     };
-  },
-
-  addSidebarCloseButton() {
-    const sidebar = $('#sidebar');
-    if (!sidebar || sidebar.querySelector('#sidebarClose')) return;
-
-    const button = document.createElement('button');
-    button.id = 'sidebarClose';
-    button.type = 'button';
-    button.className = 'icon-btn sidebar-close';
-    button.setAttribute('aria-label', 'Fechar menu lateral');
-    button.setAttribute('title', 'Fechar menu');
-    button.innerHTML = '<i class="fa-solid fa-xmark" aria-hidden="true"></i>';
-    button.onclick = () => this.closeSidebar();
-    sidebar.prepend(button);
   },
 
   toggleSidebar() {
@@ -275,20 +1212,14 @@ const App = {
           <div class="page-subtitle">Visão geral em tempo real do seu portfólio de projetos.</div>
         </div>
         <div style="display:flex;gap:8px;">
+          <button class="btn" id="btnManualUsuario"><i class="fa-solid fa-book-open"></i> Manual do usuário</button>
           <button class="btn" id="btnExportPdf"><i class="fa-solid fa-file-pdf"></i> PDF</button>
           <button class="btn" id="btnExportCsv"><i class="fa-solid fa-file-csv"></i> CSV</button>
         </div>
       </div>
 
-      <div class="kpi-grid">
-        ${kpi('Clientes', clientes.length, 'users','#6366f1','Cadastrados')}
-        ${kpi('Projetos ativos', projAtivos, 'diagram-project','#8b5cf6','de '+projetos.length)}
-        ${kpi('Em andamento', emAndamento, 'spinner','#0ea5e9','Demandas')}
-        ${kpi('Concluídas', concluidas, 'check','#10b981','Demandas')}
-        ${kpi('Atrasadas', atrasadas, 'triangle-exclamation','#ef4444','Requerem ação')}
-        ${kpi('Pendências', pendentes, 'hourglass-half','#f59e0b','Backlog + Análise + Cliente')}
-        ${kpi('SLA médio', slaDias+' d', 'clock','#06b6d4','Prazo médio')}
-        ${kpi('Produtividade', produtividade+'%','chart-line','#22c55e','Concluídas/Total')}
+      <div class="kpi-grid" data-dashboard-kpis aria-busy="true">
+        ${UI.skeletonKpis(8)}
       </div>
 
       <div class="charts-grid">
@@ -300,18 +1231,35 @@ const App = {
       </div>
     `;
 
+    $('#btnManualUsuario').onclick = () => this.openManualUsuario();
     $('#btnExportPdf').onclick = () => this.exportDashboardPDF();
     $('#btnExportCsv').onclick = () => this.exportDemandsCSV();
-    $$('[data-dashboard-icon]').forEach(card => {
-      const open = () => this.openDashboardKpi(card.dataset.dashboardIcon);
-      card.onclick = open;
-      card.onkeydown = event => {
-        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
-      };
-    });
 
-    this.drawCharts();
-    this.drawMiniTimeline();
+    requestAnimationFrame(() => {
+      const kpiGrid = root.querySelector('[data-dashboard-kpis]');
+      if (kpiGrid) {
+        kpiGrid.innerHTML = `
+          ${kpi('Clientes', clientes.length, 'users','#6366f1','Cadastrados')}
+          ${kpi('Projetos ativos', projAtivos, 'diagram-project','#8b5cf6','de '+projetos.length)}
+          ${kpi('Em andamento', emAndamento, 'spinner','#0ea5e9','Demandas')}
+          ${kpi('Concluídas', concluidas, 'check','#10b981','Demandas')}
+          ${kpi('Atrasadas', atrasadas, 'triangle-exclamation','#ef4444','Requerem ação')}
+          ${kpi('Pendências', pendentes, 'hourglass-half','#f59e0b','Backlog + Análise + Cliente')}
+          ${kpi('SLA médio', slaDias+' d', 'clock','#06b6d4','Prazo médio')}
+          ${kpi('Produtividade', produtividade+'%','chart-line','#22c55e','Concluídas/Total')}
+        `;
+        kpiGrid.removeAttribute('aria-busy');
+      }
+      $$('[data-dashboard-icon]').forEach(card => {
+        const open = () => this.openDashboardKpi(card.dataset.dashboardIcon);
+        card.onclick = open;
+        card.onkeydown = event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+        };
+      });
+      this.drawCharts();
+      this.drawMiniTimeline();
+    });
 
     function kpi(label, value, icon, color, hint) {
       return `<div class="kpi kpi-clickable" data-dashboard-icon="${icon}" role="button" tabindex="0" title="Ver itens relacionados">
@@ -323,6 +1271,181 @@ const App = {
         <div class="kpi-hint">${hint}</div>
       </div>`;
     }
+  },
+
+  openManualUsuario() {
+    const sections = [
+      {
+        title: '1. Visão geral',
+        icon: 'circle-info',
+        open: true,
+        body: `
+          <p>O FlowDesk centraliza o acompanhamento de clientes, projetos, demandas, ordens de serviço e atividades da equipe em um único ambiente.</p>
+          <ul>
+            <li><strong>Dashboard:</strong> visão rápida dos principais indicadores e da situação do portfólio.</li>
+            <li><strong>Demandas:</strong> cadastro, acompanhamento, filtros, seleção em lote e histórico das solicitações.</li>
+            <li><strong>Projetos:</strong> acompanhamento de projetos, prazos, responsáveis e demandas relacionadas.</li>
+            <li><strong>Ordens de Serviço:</strong> execução operacional, apontamentos, documentos e histórico.</li>
+            <li><strong>Clientes:</strong> cadastro, relacionamento e acesso à Área do Cliente.</li>
+          </ul>
+        `
+      },
+      {
+        title: '2. Como usar a plataforma',
+        icon: 'hand-pointer',
+        body: `
+          <p>O fluxo básico de uso é simples:</p>
+          <ol>
+            <li>Escolha a área no <strong>menu lateral</strong>.</li>
+            <li>Use a <strong>busca e os filtros</strong> para encontrar o que precisa.</li>
+            <li>Clique em um registro para abrir seus <strong>detalhes</strong>.</li>
+            <li>Use <strong>Editar</strong> quando precisar alterar informações.</li>
+            <li>Para ações repetitivas, utilize <strong>seleção múltipla</strong> e as ações em lote.</li>
+            <li>Quando disponível, salve combinações de filtros em <strong>Meus filtros</strong>.</li>
+          </ol>
+          <div class="manual-tip"><i class="fa-solid fa-lightbulb"></i><div><strong>Dica:</strong> o FlowDesk foi organizado para que detalhes fiquem no drawer e alterações mais completas sejam feitas na edição.</div></div>
+        `
+      },
+      {
+        title: '3. Dashboard',
+        icon: 'chart-pie',
+        body: `
+          <p>O Dashboard apresenta uma visão geral do portfólio. Os cards de indicadores podem ser clicados para abrir os registros relacionados.</p>
+          <p>Os gráficos ajudam a visualizar distribuição por <strong>status</strong>, <strong>executante</strong>, <strong>cliente</strong> e evolução das demandas.</p>
+          <p>Use os botões do cabeçalho para abrir este manual ou exportar informações em <strong>PDF</strong> e <strong>CSV</strong>.</p>
+        `
+      },
+      {
+        title: '4. Demandas',
+        icon: 'list-check',
+        body: `
+          <p>A tela de Demandas é o principal ponto de acompanhamento das solicitações.</p>
+          <ul>
+            <li><strong>Nova demanda:</strong> cria uma nova solicitação.</li>
+            <li><strong>Filtros:</strong> refinam os resultados por status, projeto, cliente, responsável, prioridade e outros campos.</li>
+            <li><strong>Filtros ativos:</strong> aparecem como chips e podem ser removidos individualmente.</li>
+            <li><strong>Meus filtros:</strong> permite salvar e reutilizar combinações de filtros.</li>
+            <li><strong>Seleção:</strong> marque várias linhas para realizar ações em lote.</li>
+            <li><strong>Detalhes:</strong> clique na linha para abrir o drawer.</li>
+            <li><strong>Edição:</strong> use o botão Editar quando precisar alterar informações ou relacionamentos.</li>
+          </ul>
+        `
+      },
+      {
+        title: '5. Projetos',
+        icon: 'diagram-project',
+        body: `
+          <p>Projetos agrupam demandas e permitem acompanhar responsáveis, prazo, prioridade e andamento.</p>
+          <p>Abra um projeto para consultar suas informações e navegar até as demandas relacionadas. Use a edição para manter os dados cadastrais atualizados.</p>
+        `
+      },
+      {
+        title: '6. Clientes e Área do Cliente',
+        icon: 'building',
+        body: `
+          <p>Em <strong>Clientes</strong> você encontra os dados cadastrais e o relacionamento com a empresa.</p>
+          <p>A <strong>Área do Cliente</strong> concentra informações relevantes para apresentação externa, incluindo projetos, cronogramas e acompanhamento de demandas.</p>
+          <p>Use a visualização de detalhes para consultar informações sem perder a tela em que você estava trabalhando.</p>
+        `
+      },
+      {
+        title: '7. Kanban',
+        icon: 'columns-3',
+        body: `
+          <p>O Kanban organiza as demandas por estágio e permite acompanhar o fluxo visualmente.</p>
+          <ul>
+            <li>Arraste uma demanda para outra coluna para iniciar a mudança de status.</li>
+            <li>As colunas de destino são destacadas durante o arraste.</li>
+            <li>Transições sensíveis podem solicitar confirmação antes de concluir a movimentação.</li>
+            <li>Os cards exibem título, cliente, responsável, prioridade, prazo e informações complementares.</li>
+          </ul>
+        `
+      },
+      {
+        title: '8. Ordens de Serviço',
+        icon: 'screwdriver-wrench',
+        body: `
+          <p>As Ordens de Serviço são usadas para controlar a execução operacional.</p>
+          <p>Consulte os dados gerais, apontamentos, histórico, documentos e demais informações vinculadas. Quando uma OS estiver associada a uma demanda, mantenha o relacionamento para facilitar a rastreabilidade.</p>
+        `
+      },
+      {
+        title: '9. Calendário, Timeline e Reuniões',
+        icon: 'calendar-days',
+        body: `
+          <p>Use o <strong>Calendário</strong> para visualizar compromissos e prazos, a <strong>Timeline</strong> para acompanhar a sequência de eventos e <strong>Reuniões</strong> para registrar encontros e compromissos da equipe.</p>
+          <p>Essas áreas complementam o acompanhamento das demandas sem substituir o registro principal da atividade.</p>
+        `
+      },
+      {
+        title: '10. Tabelas, exportação e filtros',
+        icon: 'table-columns',
+        body: `
+          <p>As tabelas seguem um padrão comum no FlowDesk para facilitar o uso entre as telas.</p>
+          <ul>
+            <li>Ordene colunas quando essa opção estiver disponível.</li>
+            <li>Redimensione ou oculte colunas conforme a necessidade.</li>
+            <li>Use seleção múltipla para ações em lote.</li>
+            <li>Exporte dados em CSV quando a tela disponibilizar essa ação.</li>
+            <li>Ao não encontrar resultados, ajuste os filtros ou use a ação sugerida pelo estado vazio.</li>
+          </ul>
+        `
+      },
+      {
+        title: '11. Boas práticas',
+        icon: 'shield-heart',
+        body: `
+          <ul>
+            <li>Mantenha <strong>responsável, prazo e status</strong> atualizados.</li>
+            <li>Registre comentários relevantes para que o histórico conte a evolução da demanda.</li>
+            <li>Use checklist para tarefas operacionais que precisam ser conferidas.</li>
+            <li>Prefira filtros salvos para consultas repetitivas.</li>
+            <li>Antes de excluir ou fazer alterações em lote, confira a seleção.</li>
+          </ul>
+        `
+      },
+      {
+        title: '12. Configurações e suporte',
+        icon: 'gear',
+        body: `
+          <p>As configurações ficam no menu <strong>Sistema</strong>. Dependendo do seu perfil, algumas opções podem não estar disponíveis.</p>
+          <p>Quando precisar de ajuda, consulte este manual e, em seguida, verifique os detalhes do registro e seu histórico antes de solicitar suporte.</p>
+        `
+      }
+    ];
+
+    const body = `
+      <div class="manual-modal">
+        <div class="manual-intro">
+          <div class="manual-intro-icon"><i class="fa-solid fa-book-open"></i></div>
+          <div>
+            <h4>Manual do Usuário — FlowDesk</h4>
+            <p>Guia rápido para navegar pela plataforma, acompanhar demandas e utilizar os principais recursos.</p>
+          </div>
+        </div>
+        <div class="manual-accordion">
+          ${sections.map(section => `
+            <details class="manual-section" ${section.open ? 'open' : ''}>
+              <summary>
+                <span class="manual-section-title"><i class="fa-solid fa-${section.icon}"></i>${section.title}</span>
+                <i class="fa-solid fa-chevron-down manual-chevron" aria-hidden="true"></i>
+              </summary>
+              <div class="manual-section-body">${section.body}</div>
+            </details>
+          `).join('')}
+        </div>
+      </div>`;
+
+    UI.modal({
+      title: 'Manual do Usuário — FlowDesk',
+      size: 'manual-lg',
+      body,
+      footer: '<button class="btn" data-close-manual>Fechar</button>',
+      onOpen: (root, close) => {
+        const closeBtn = root.querySelector('[data-close-manual]');
+        if (closeBtn) closeBtn.onclick = close;
+      }
+    });
   },
 
   drawCharts() {
@@ -1165,6 +2288,9 @@ const App = {
         return true;
       });
       this.applySort(list);
+      this.updateDemandasOverview(list);
+      const saveFilterBtn = $('#demandasSaveFilter');
+      if (saveFilterBtn) saveFilterBtn.disabled = !this.currentDemandasFilterHasValues();
       const tb = $('#tbody');
       if (!list.length) { tb.innerHTML = `<tr><td colspan="9">${UI.emptyState('diagram-project','Nenhum projeto encontrado.')}</td></tr>`; return; }
       tb.innerHTML = list.map(p => {
@@ -1295,33 +2421,170 @@ const App = {
     const prOpts = ['<option value="">Todas prioridades</option>'].concat(Object.keys(PRIORIDADE).map(p=>`<option value="${p}" ${p===f.prioridade?'selected':''}>${PRIORIDADE[p].label}</option>`)).join('');
     const eqOpts = ['<option value="">Todas equipes</option>'].concat(Object.keys(EQUIPE_AREA).map(k=>`<option value="${k}" ${k===f.equipe?'selected':''}>${EQUIPE_AREA[k].label}</option>`)).join('');
 
+    const demandaOverview = Store.demandas();
+    const demandaTotal = demandaOverview.length;
+    const demandaAtrasadas = demandaOverview.filter(d => isLate(d)).length;
+    const demandaEmAnalise = demandaOverview.filter(d => d.status === 'analise').length;
+    const advancedFilterCount = ['id','equipe','data'].filter(key => String(f[key] || '').trim()).length;
+    const savedDemandasFiltersCount = this.getDemandasSavedFilters().length;
+
+    const filterLabel = (key) => {
+      const value = f[key];
+      if (!value) return '';
+      if (key === 'id') return `ID: #${escapeHTML(value)}`;
+      if (key === 'q') return `Busca: ${escapeHTML(value)}`;
+      if (key === 'cliente') return `Cliente: ${escapeHTML(value)}`;
+      if (key === 'projeto') {
+        const p = Store.projeto(value);
+        return `Projeto: ${escapeHTML(p?.nome || value)}`;
+      }
+      if (key === 'responsavel') {
+        const r = Store.pessoa(value);
+        return `Responsável: ${escapeHTML(r?.nome || value)}`;
+      }
+      if (key === 'equipe') return `Equipe: ${escapeHTML(EQUIPE_AREA[value]?.label || value)}`;
+      if (key === 'status') {
+        const labels = {
+          '__em_andamento':'Em andamento',
+          'atrasado':'Atrasadas',
+          '__pendencias':'Pendências'
+        };
+        return `Status: ${escapeHTML(labels[value] || STATUS[value]?.label || value)}`;
+      }
+      if (key === 'prioridade') return `Prioridade: ${escapeHTML(PRIORIDADE[value]?.label || value)}`;
+      if (key === 'data') return `Prazo: ${escapeHTML(fmtDate(value))}`;
+      return '';
+    };
+
+    const activeFilterKeys = ['q','status','projeto','cliente','responsavel','prioridade','id','equipe','data']
+      .filter(key => String(f[key] || '').trim());
+    const activeFiltersHTML = activeFilterKeys.map(key => `
+      <button class="demandas-filter-chip" type="button" data-clear-filter="${key}" title="Remover filtro">
+        <span>${filterLabel(key)}</span><i class="fa-solid fa-xmark" aria-hidden="true"></i>
+      </button>`).join('');
+
     root.innerHTML = `
-      <div class="page-header">
-        <div><h1 class="page-title">Demandas</h1><div class="page-subtitle">Acompanhe todas as tarefas.</div></div>
-        <div style="display:flex;gap:8px;">
+      <div class="page-header demandas-page-header">
+        <div class="page-heading">
+          <h1 class="page-title">Demandas</h1>
+          <div class="page-subtitle">Gerencie solicitações, prazos e responsáveis.</div>
+          <div class="page-summary" aria-label="Resumo das demandas">
+            <div class="page-summary-item"><strong id="demandasSummaryTotal">${demandaTotal}</strong><span id="demandasSummaryTotalLabel">demanda${demandaTotal === 1 ? '' : 's'}</span></div>
+            <span class="page-summary-separator" aria-hidden="true"></span>
+            <div class="page-summary-item"><strong id="demandasSummaryLate">${demandaAtrasadas}</strong><span id="demandasSummaryLateLabel">atrasada${demandaAtrasadas === 1 ? '' : 's'}</span></div>
+            <span class="page-summary-separator" aria-hidden="true"></span>
+            <div class="page-summary-item"><strong id="demandasSummaryAnalysis">${demandaEmAnalise}</strong><span>em análise</span></div>
+          </div>
+        </div>
+        <div class="page-header-actions">
           <button class="btn" id="btnImport"><i class="fa-solid fa-file-import"></i> Importar</button>
           <button class="btn" id="btnCsv"><i class="fa-solid fa-file-csv"></i> Exportar</button>
           <button class="btn btn-primary" id="btnNovo"><i class="fa-solid fa-plus"></i> Nova Demanda</button>
         </div>
       </div>
-      <div class="toolbar">
-        <input id="fid" placeholder="ID" value="${escapeHTML(f.id||'')}" style="max-width:90px"/>
-        <input id="fq" placeholder="Pesquisar demandas..." value="${escapeHTML(f.q)}" style="min-width:220px;flex:1"/>
-        <select id="fcli">${cliOpts}</select>
-        <select id="fproj">${projOpts}</select>
-        <select id="fresp">${respOpts}</select>
-        <select id="feq">${eqOpts}</select>
-        <select id="fst">${stOpts}</select>
-        <select id="fpr">${prOpts}</select>
-        <input type="date" id="fdata" value="${f.data||''}"/>
-        <button class="btn btn-sm" id="fclear"><i class="fa-solid fa-eraser"></i></button>
+      <div class="demandas-filters-panel">
+        <div class="demandas-filter-toolbar">
+          <div class="demandas-filter-toolbar-title">
+            <i class="fa-solid fa-filter" aria-hidden="true"></i>
+            <span>Filtros</span>
+            ${activeFilterKeys.length ? `<small>${activeFilterKeys.length} ativo${activeFilterKeys.length === 1 ? '' : 's'}</small>` : '<small>Refine a lista de demandas</small>'}
+          </div>
+          <div class="demandas-filter-actions">
+            <button class="btn btn-sm demandas-more-filters ${this.demandasFiltersOpen ? 'is-open' : ''}" id="demandasMoreFilters" type="button" aria-expanded="${this.demandasFiltersOpen}">
+              <i class="fa-solid fa-sliders"></i> ${this.demandasFiltersOpen ? 'Ocultar filtros' : 'Mais filtros'}${advancedFilterCount ? ` <span class="demandas-more-count">${advancedFilterCount}</span>` : ''}
+            </button>
+            <button class="btn btn-sm demandas-saved-filters" id="demandasSavedFilters" type="button">
+              <i class="fa-regular fa-bookmark"></i> Meus filtros${savedDemandasFiltersCount ? ` <span class="demandas-more-count">${savedDemandasFiltersCount}</span>` : ''}
+            </button>
+            <button class="btn btn-sm demandas-save-filter" id="demandasSaveFilter" type="button" ${this.currentDemandasFilterHasValues() ? '' : 'disabled'}>
+              <i class="fa-solid fa-bookmark"></i> Salvar filtro
+            </button>
+          </div>
+        </div>
+        <div class="demandas-filter-main">
+          <label class="demandas-search-field">
+            <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+            <input id="fq" placeholder="Buscar demandas..." value="${escapeHTML(f.q)}" aria-label="Buscar demandas"/>
+          </label>
+          <div class="demandas-filter-field">
+            <span>Status</span>
+            <select id="fst">${stOpts}</select>
+          </div>
+          <div class="demandas-filter-field">
+            <span>Projeto</span>
+            <select id="fproj">${projOpts}</select>
+          </div>
+          <div class="demandas-filter-field">
+            <span>Cliente</span>
+            <select id="fcli">${cliOpts}</select>
+          </div>
+          <div class="demandas-filter-field">
+            <span>Responsável</span>
+            <select id="fresp">${respOpts}</select>
+          </div>
+          <div class="demandas-filter-field">
+            <span>Prioridade</span>
+            <select id="fpr">${prOpts}</select>
+          </div>
+        </div>
+        <div class="demandas-filter-advanced" id="demandasAdvancedFilters" ${this.demandasFiltersOpen ? '' : 'hidden'}>
+          <div class="demandas-filter-field demandas-filter-id">
+            <span>ID</span>
+            <input id="fid" placeholder="Ex.: 84" value="${escapeHTML(f.id||'')}" inputmode="numeric"/>
+          </div>
+          <div class="demandas-filter-field">
+            <span>Equipe</span>
+            <select id="feq">${eqOpts}</select>
+          </div>
+          <div class="demandas-filter-field">
+            <span>Prazo</span>
+            <input type="date" id="fdata" value="${f.data||''}"/>
+          </div>
+          <button class="btn btn-sm demandas-clear-filters" id="fclear" type="button"><i class="fa-solid fa-eraser"></i> Limpar filtros</button>
+        </div>
+        <div class="demandas-active-filters" id="demandasActiveFilters" ${activeFiltersHTML ? '' : 'hidden'}>
+          <span class="demandas-active-label">Filtros ativos:</span>
+          <div class="demandas-filter-chips">${activeFiltersHTML}</div>
+          ${activeFiltersHTML ? '<button class="demandas-active-clear" id="demandasClearActive" type="button">Limpar todos</button>' : ''}
+        </div>
       </div>
-      <div class="table-wrap"><table class="demandas-table">
+      <div class="bulk-selection-bar" id="demandasSelectionBar" hidden>
+        <div class="bulk-selection-summary">
+          <span class="bulk-selection-count" id="demandasSelectionCount">0 selecionadas</span>
+          <button class="bulk-selection-clear" id="demandasSelectionClear" type="button">Limpar seleção</button>
+        </div>
+        <div class="bulk-selection-actions">
+          <button class="btn btn-sm" id="demandasBulkStatus" type="button"><i class="fa-solid fa-arrow-right-arrow-left"></i> Alterar status</button>
+          <button class="btn btn-sm" id="demandasBulkAssign" type="button"><i class="fa-solid fa-user-plus"></i> Atribuir</button>
+          <button class="btn btn-sm btn-danger" id="demandasBulkDelete" type="button"><i class="fa-solid fa-trash"></i> Excluir</button>
+          <button class="btn btn-sm" id="demandasBulkExport" type="button"><i class="fa-solid fa-file-csv"></i> Exportar</button>
+        </div>
+      </div>
+      <div class="table-wrap demandas-table-wrap"><table class="demandas-table" data-flow-table="demandas">
         <thead><tr>
+          <th class="selection-column" data-no-sort data-no-menu="true" data-no-resize="true" aria-label="Seleção"></th>
           <th data-sort="_seq">ID</th><th data-sort="titulo">Título</th><th>Projeto</th><th>Cliente</th><th>Executante</th><th>Equipe</th>
-          <th>Status</th><th>Prioridade</th><th data-sort="prazo">Prazo</th><th style="width:170px"></th>
+          <th>Status</th><th>Prioridade</th><th data-sort="prazo">Prazo</th><th data-label="Ações" data-col-role="actions"></th>
         </tr></thead><tbody id="tbody"></tbody>
-      </table></div>`;
+      </table></div>
+      <div class="demandas-mobile-list" id="demandasMobileList" aria-label="Demandas em formato compacto"></div>`;
+
+    const demandasTable = root.querySelector("table[data-flow-table=\"demandas\"]");
+    const demandasFlowTable = window.FlowTable?.enhance(demandasTable, {
+      key: "demandas",
+      selection: {
+        enabled: true,
+        headerCheckbox: false,
+        getId: row => row.dataset.selectionId,
+        isSelected: id => this.selectedDemandas.has(String(id)),
+        onToggle: (id, checked) => {
+          if (checked) this.selectedDemandas.add(String(id));
+          else this.selectedDemandas.delete(String(id));
+          const ids = Array.from(root.querySelectorAll("tbody tr[data-selection-id]"), row => row.dataset.selectionId);
+          this.updateDemandasSelectionUI(ids);
+        }
+      }
+    });
 
     const draw = () => {
       let list = Store.demandas().filter(d => {
@@ -1350,34 +2613,151 @@ const App = {
         return true;
       });
       this.applySort(list);
+      // O resumo do topo deve representar exatamente o conjunto filtrado.
+      // Fazemos isso depois de aplicar todos os filtros e antes de renderizar a tabela.
+      this.updateDemandasOverview(list);
       const tb = $('#tbody');
-      if (!list.length) { tb.innerHTML = `<tr><td colspan="9">${UI.emptyState('list-check','Nenhuma demanda encontrada.')}</td></tr>`; return; }
+      const mobileList = $('#demandasMobileList');
+      const visibleIds = list.map(d => d.id);
+      const existingIds = new Set(Store.demandas().map(d => d.id));
+      this.selectedDemandas.forEach(id => { if (!existingIds.has(id)) this.selectedDemandas.delete(id); });
+
+      if (!list.length) {
+        const hasFilters = Object.values(f).some(value => String(value || '').trim() !== '') || Boolean(clienteIdsSelecionados?.length);
+        const description = hasFilters
+          ? 'Crie uma nova demanda ou ajuste os filtros para visualizar resultados.'
+          : 'Crie sua primeira demanda para começar a organizar solicitações, prazos e responsáveis.';
+        const emptyState = UI.emptyState('list-check','Nenhuma demanda encontrada.', {
+          description,
+          action: { key: 'new-demand', label: 'Nova demanda', icon: 'plus' }
+        });
+        tb.innerHTML = `<tr class="is-empty-row"><td colspan="11">${emptyState}</td></tr>`;
+        if (mobileList) mobileList.innerHTML = `<div class="demandas-mobile-empty">${emptyState}</div>`;
+        const emptyAction = tb.querySelector('[data-empty-action="new-demand"]');
+        const mobileEmptyAction = mobileList?.querySelector('[data-empty-action="new-demand"]');
+        if (emptyAction) emptyAction.onclick = () => this.openDemandaModal();
+        if (mobileEmptyAction) mobileEmptyAction.onclick = () => this.openDemandaModal();
+        demandasFlowTable?.refresh();
+        this.updateDemandasSelectionUI([]);
+        return;
+      }
       tb.innerHTML = list.map(d => {
         const cli = Store.cliente(d.clienteId); const proj = Store.projeto(d.projetoId); const resp = Store.pessoa(d.responsavelId);
         const late = isLate(d);
-        return `<tr>
+        const selected = this.selectedDemandas.has(d.id);
+        return `<tr data-selection-id="${escapeHTML(d.id)}" class="${selected ? 'is-selected' : ''}">
+          <td class="selection-column"><input type="checkbox" class="table-row-checkbox" data-selection-id="${escapeHTML(d.id)}" ${selected ? 'checked' : ''} aria-label="Selecionar demanda ${escapeHTML(d.titulo)}" /></td>
           <td style="color:var(--text-2);font-variant-numeric:tabular-nums;">#${Store.demandaSeq(d.id)}</td>
           <td><strong style="cursor:pointer" data-a="open" data-id="${d.id}">${escapeHTML(d.titulo)}</strong>
             <div style="margin-top:4px;">${(d.tags||[]).map(t=>`<span class="tag">${escapeHTML(t)}</span>`).join('')}</div></td>
-          <td>${escapeHTML(nomeProjeto(d)||'—')}</td>
-          <td>${escapeHTML(cli?.empresa||'—')}</td>
+          <td data-table-tooltip="${escapeHTML(nomeProjeto(d)||'—')}"><span class="table-tooltip-text">${escapeHTML(nomeProjeto(d)||'—')}</span></td>
+          <td data-table-tooltip="${escapeHTML(cli?.empresa||'—')}"><span class="table-tooltip-text">${escapeHTML(cli?.empresa||'—')}</span></td>
           <td>${escapeHTML(nomeResponsavel(d)||'—')}</td>
           <td>${UI.equipeAreaPill(d.equipeArea)}</td>
           <td>${UI.statusPill(late?'atrasado':d.status)}</td>
           <td>${UI.prioPill(d.prioridade)}</td>
           <td>${fmtDate(d.prazo)}</td>
-          <td><div class="row-actions">
-            <button data-a="open" data-id="${d.id}" title="Detalhes"><i class="fa-solid fa-eye"></i></button>
-            <button data-a="edit" data-id="${d.id}" title="Editar"><i class="fa-solid fa-pen"></i></button>
-            <button data-a="dup" data-id="${d.id}" title="Duplicar"><i class="fa-solid fa-copy"></i></button>
-            <button class="del" data-a="del" data-id="${d.id}" title="Excluir"><i class="fa-solid fa-trash"></i></button>
+          <td><div class="row-actions row-actions-modern">
+            <button class="row-action-primary" data-a="open" data-id="${d.id}" title="Ver detalhes"><i class="fa-solid fa-eye"></i><span></span></button>
+            <button class="row-action-primary" data-a="edit" data-id="${d.id}" title="Editar demanda"><i class="fa-solid fa-pen"></i><span></span></button>
+            <button class="row-action-more" data-a="more" data-id="${d.id}" title="Mais ações" aria-label="Mais ações" aria-haspopup="menu" aria-expanded="false"><i class="fa-solid fa-ellipsis-vertical"></i></button>
           </div></td>
         </tr>`;
       }).join('');
-      tb.querySelectorAll('[data-a="open"]').forEach(b => b.onclick = () => this.openDemandaDrawer(b.dataset.id));
-      tb.querySelectorAll('[data-a="edit"]').forEach(b => b.onclick = () => this.openDemandaModal(Store.demanda(b.dataset.id)));
-      tb.querySelectorAll('[data-a="dup"]').forEach(b => b.onclick = () => this.dupDemanda(b.dataset.id));
-      tb.querySelectorAll('[data-a="del"]').forEach(b => b.onclick = () => this.delDemanda(b.dataset.id));
+
+      if (mobileList) {
+        mobileList.innerHTML = list.map(d => {
+          const cli = Store.cliente(d.clienteId);
+          const late = isLate(d);
+          const selected = this.selectedDemandas.has(d.id);
+          const statusKey = late ? 'atrasado' : d.status;
+          const projectName = nomeProjeto(d) || 'Sem projeto';
+          const clientName = cli?.empresa || 'Sem cliente';
+          const responsible = nomeResponsavel(d) || 'Sem executante';
+          const tags = (d.tags || []).slice(0,3).map(t => `<span class="tag">${escapeHTML(t)}</span>`).join('');
+          return `<article class="demandas-mobile-card ${selected ? 'is-selected' : ''}" data-selection-id="${escapeHTML(d.id)}">
+            <div class="demandas-mobile-card-head">
+              <label class="demandas-mobile-select" aria-label="Selecionar demanda ${escapeHTML(d.titulo)}">
+                <input type="checkbox" class="table-row-checkbox" data-selection-id="${escapeHTML(d.id)}" ${selected ? 'checked' : ''} />
+                <span aria-hidden="true"></span>
+              </label>
+              <span class="demandas-mobile-id">#${Store.demandaSeq(d.id)}</span>
+              <div class="demandas-mobile-head-actions">
+                <button class="demandas-mobile-icon-btn" data-a="open" data-id="${d.id}" title="Ver detalhes" aria-label="Ver detalhes"><i class="fa-solid fa-eye"></i></button>
+                <button class="demandas-mobile-icon-btn" data-a="edit" data-id="${d.id}" title="Editar demanda" aria-label="Editar demanda"><i class="fa-solid fa-pen"></i></button>
+              </div>
+            </div>
+            <button class="demandas-mobile-title" data-a="open" data-id="${d.id}">${escapeHTML(d.titulo)}</button>
+            <div class="demandas-mobile-context">
+              <span><i class="fa-solid fa-diagram-project"></i>${escapeHTML(projectName)}</span>
+              <span><i class="fa-solid fa-building"></i>${escapeHTML(clientName)}</span>
+            </div>
+            <div class="demandas-mobile-status-row">
+              ${UI.statusPill(statusKey)}
+              ${UI.prioPill(d.prioridade)}
+            </div>
+            <div class="demandas-mobile-info-row">
+              <span><i class="fa-solid fa-user"></i>${escapeHTML(responsible)}</span>
+              <span class="${late ? 'is-late' : ''}"><i class="fa-regular fa-calendar"></i>${fmtDate(d.prazo)}</span>
+            </div>
+            ${tags ? `<div class="demandas-mobile-tags">${tags}</div>` : ''}
+            <div class="demandas-mobile-actions">
+              <button class="btn btn-sm demandas-mobile-view-btn" data-a="open" data-id="${d.id}"><i class="fa-solid fa-eye"></i> Ver demanda</button>
+              <button class="btn btn-sm" data-a="edit" data-id="${d.id}"><i class="fa-solid fa-pen"></i> Editar</button>
+            </div>
+          </article>`;
+        }).join('');
+      }
+
+      tb.querySelectorAll('tr[data-selection-id]').forEach(row => {
+        row.onclick = event => {
+          if (event.target.closest('input, button, a, select, textarea, label, [data-a="more"]')) return;
+          this.openDemandaDrawer(row.dataset.selectionId);
+        };
+      });
+      tb.querySelectorAll('[data-a="open"]').forEach(b => b.onclick = event => { event.stopPropagation(); this.openDemandaDrawer(b.dataset.id); });
+      tb.querySelectorAll('[data-a="edit"]').forEach(b => b.onclick = event => { event.stopPropagation(); this.openDemandaModal(Store.demanda(b.dataset.id)); });
+      tb.querySelectorAll('[data-a="more"]').forEach(b => b.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        TableResizer.openRowActionsMenu(b, b.dataset.id);
+      });
+
+      if (mobileList) {
+        mobileList.querySelectorAll('.table-row-checkbox[data-selection-id]').forEach(checkbox => {
+          checkbox.onclick = event => {
+            event.stopPropagation();
+            const id = checkbox.dataset.selectionId;
+            if (checkbox.checked) this.selectedDemandas.add(id);
+            else this.selectedDemandas.delete(id);
+            checkbox.closest('.demandas-mobile-card')?.classList.toggle('is-selected', checkbox.checked);
+            this.updateDemandasSelectionUI(visibleIds);
+          };
+        });
+        mobileList.querySelectorAll('[data-a="open"]').forEach(b => {
+          b.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.openDemandaDrawer(b.dataset.id);
+          };
+        });
+        mobileList.querySelectorAll('[data-a="edit"]').forEach(b => {
+          b.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.openDemandaModal(Store.demanda(b.dataset.id));
+          };
+        });
+        mobileList.querySelectorAll('.demandas-mobile-card').forEach(card => {
+          card.onclick = event => {
+            if (event.target.closest('input, button, a, select, textarea, label')) return;
+            this.openDemandaDrawer(card.dataset.selectionId);
+          };
+        });
+      }
+
+      demandasFlowTable?.refresh();
+      this.updateDemandasSelectionUI(visibleIds);
     };
     $('#fid').addEventListener('input', debounce(e=>{ f.id = e.target.value; draw(); }, 150));
     $('#fq').addEventListener('input', debounce(e=>{ f.q = e.target.value; draw(); }, 150));
@@ -1392,20 +2772,164 @@ const App = {
     };
     ['fresp','feq','fst','fpr'].forEach(id => $('#'+id).onchange = e => {
       const map = { fresp:'responsavel', feq:'equipe', fst:'status', fpr:'prioridade' };
-      f[map[id]] = e.target.value; draw();
+      f[map[id]] = e.target.value;
+      draw();
     });
     $('#fdata').onchange = e => { f.data = e.target.value; draw(); };
-    $('#fclear').onclick = () => { const cli = f.cliente; Object.assign(f, { id:'',q:'',cliente:cli,projeto:'',responsavel:'',equipe:'',status:'',prioridade:'',data:'' }); doRender(); };
+    $('#demandasMoreFilters').onclick = () => {
+      this.demandasFiltersOpen = !this.demandasFiltersOpen;
+      const advanced = $('#demandasAdvancedFilters');
+      const btn = $('#demandasMoreFilters');
+      if (advanced) advanced.hidden = !this.demandasFiltersOpen;
+      if (btn) {
+        btn.classList.toggle('is-open', this.demandasFiltersOpen);
+        btn.setAttribute('aria-expanded', String(this.demandasFiltersOpen));
+        btn.innerHTML = `<i class="fa-solid fa-sliders"></i> ${this.demandasFiltersOpen ? 'Ocultar filtros' : 'Mais filtros'}${advancedFilterCount ? ` <span class="demandas-more-count">${advancedFilterCount}</span>` : ''}`;
+      }
+    };
+    $('#demandasSavedFilters').onclick = () => this.openDemandasSavedFiltersModal();
+    $('#demandasSaveFilter').onclick = () => this.openSaveDemandasFilterModal();
+    $('#fclear').onclick = () => { Object.assign(f, { id:'',q:'',cliente:'',projeto:'',responsavel:'',equipe:'',status:'',prioridade:'',data:'' }); this.demandasFiltersOpen = false; doRender(); };
+    $('#demandasClearActive')?.addEventListener('click', () => { Object.assign(f, { id:'',q:'',cliente:'',projeto:'',responsavel:'',equipe:'',status:'',prioridade:'',data:'' }); this.demandasFiltersOpen = false; doRender(); });
+    $$('#demandasActiveFilters [data-clear-filter]').forEach(button => {
+      button.onclick = () => {
+        const key = button.dataset.clearFilter;
+        if (!key) return;
+        f[key] = '';
+        if (key === 'cliente') f.projeto = '';
+        doRender();
+      };
+    });
     $('#btnNovo').onclick = () => this.openDemandaModal();
     $('#btnImport').onclick = () => this.importCSV('demandas');
     $('#btnCsv').onclick = () => this.exportDemandsCSV();
+    $('#demandasSelectionClear').onclick = () => { this.selectedDemandas.clear(); draw(); };
+    $('#demandasBulkStatus').onclick = () => this.bulkUpdateDemandasStatus();
+    $('#demandasBulkAssign').onclick = () => this.bulkAssignDemandas();
+    $('#demandasBulkDelete').onclick = () => this.bulkDeleteDemandas();
+    $('#demandasBulkExport').onclick = () => this.exportSelectedDemandasCSV();
     $$('th[data-sort]').forEach(th => th.onclick = () => { this.toggleSort(th.dataset.sort); draw(); });
-    draw();
+    const initialTbody = $('#tbody');
+    if (initialTbody) initialTbody.innerHTML = UI.skeletonRows(7, 11);
+    requestAnimationFrame(draw);
+  },
+
+  updateDemandasOverview(list = []) {
+    const total = list.length;
+    const late = list.filter(d => isLate(d)).length;
+    const analysis = list.filter(d => d.status === 'analise').length;
+
+    const totalEl = $('#demandasSummaryTotal');
+    const totalLabelEl = $('#demandasSummaryTotalLabel');
+    const lateEl = $('#demandasSummaryLate');
+    const lateLabelEl = $('#demandasSummaryLateLabel');
+    const analysisEl = $('#demandasSummaryAnalysis');
+
+    if (totalEl) totalEl.textContent = total;
+    if (totalLabelEl) totalLabelEl.textContent = `demanda${total === 1 ? '' : 's'}`;
+    if (lateEl) lateEl.textContent = late;
+    if (lateLabelEl) lateLabelEl.textContent = `atrasada${late === 1 ? '' : 's'}`;
+    if (analysisEl) analysisEl.textContent = analysis;
+  },
+
+  updateDemandasSelectionUI(visibleIds = []) {
+    const selectedCount = this.selectedDemandas.size;
+    const bar = $('#demandasSelectionBar');
+    const count = $('#demandasSelectionCount');
+    const clear = $('#demandasSelectionClear');
+    if (bar) bar.hidden = selectedCount === 0;
+    if (count) count.textContent = `${selectedCount} ${selectedCount === 1 ? 'selecionada' : 'selecionadas'}`;
+    if (clear) clear.disabled = selectedCount === 0;
+  },
+
+  getSelectedDemandas() {
+    return Array.from(this.selectedDemandas).map(id => Store.demanda(id)).filter(Boolean);
+  },
+
+  bulkUpdateDemandasStatus() {
+    const selected = this.getSelectedDemandas();
+    if (!selected.length) return UI.toast('Selecione pelo menos uma demanda.', 'warn');
+    const options = STATUS_ORDER.filter(s => s !== 'atrasado').map(s => ({ value:s, label:STATUS[s].label }));
+    UI.modal({
+      title: `Alterar status (${selected.length})`,
+      body: `<div class="field full"><label>Novo status</label>${UI.select('bulkStatus', options, selected[0]?.status || 'backlog')}</div>`,
+      footer: '<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="confirmBulkStatus"><i class="fa-solid fa-check"></i> Aplicar</button>',
+      onOpen: (root, close) => {
+        root.querySelector('[data-close-modal]').onclick = close;
+        root.querySelector('#confirmBulkStatus').onclick = () => {
+          const status = root.querySelector('[name="bulkStatus"]')?.value || 'backlog';
+          selected.forEach(d => Store.upsert('demandas', { ...d, status }));
+          this.selectedDemandas.clear();
+          close();
+          UI.toast(`${selected.length} demanda(s) atualizada(s).`, 'success');
+          this.render();
+        };
+      }
+    });
+  },
+
+  bulkAssignDemandas() {
+    const selected = this.getSelectedDemandas();
+    if (!selected.length) return UI.toast('Selecione pelo menos uma demanda.', 'warn');
+    const options = [
+      { value:'', label:'Sem executante' },
+      ...Store.equipe().slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'', 'pt-BR')).map(p => ({ value:p.id, label:p.nome }))
+    ];
+    UI.modal({
+      title: `Atribuir executante (${selected.length})`,
+      body: `<div class="field full"><label>Executante</label>${UI.select('bulkResponsavel', options, selected[0]?.responsavelId || '')}</div>`,
+      footer: '<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="confirmBulkAssign"><i class="fa-solid fa-check"></i> Aplicar</button>',
+      onOpen: (root, close) => {
+        root.querySelector('[data-close-modal]').onclick = close;
+        root.querySelector('#confirmBulkAssign').onclick = () => {
+          const responsavelId = root.querySelector('[name="bulkResponsavel"]')?.value || '';
+          selected.forEach(d => Store.upsert('demandas', { ...d, responsavelId, responsavelNome:'' }));
+          this.selectedDemandas.clear();
+          close();
+          UI.toast(`${selected.length} demanda(s) atribuída(s).`, 'success');
+          this.render();
+        };
+      }
+    });
+  },
+
+  bulkDeleteDemandas() {
+    const selected = this.getSelectedDemandas();
+    if (!selected.length) return UI.toast('Selecione pelo menos uma demanda.', 'warn');
+    UI.confirm('Excluir demandas selecionadas', `Esta ação excluirá ${selected.length} demanda(s). Você poderá desfazer por alguns segundos. Continuar?`, async () => {
+      const backup = selected.map(d => structuredClone(d));
+      const deleted = [];
+      try {
+        for (const d of backup) {
+          await Store.removeAwait('demandas', d.id);
+          deleted.push(d);
+        }
+        this.selectedDemandas.clear();
+        this.render();
+        UI.toastAction(
+          `${deleted.length} demanda(s) excluída(s).`,
+          'Desfazer',
+          async () => {
+            for (const d of deleted) Store.upsert('demandas', d);
+            this.render();
+            this.selectedDemandas.clear();
+          },
+          'success',
+          7000
+        );
+      } catch (err) {
+        console.error(err);
+        deleted.forEach(d => Store.upsert('demandas', d));
+        this.selectedDemandas.clear();
+        UI.toast('Não foi possível concluir a exclusão. Nenhuma demanda foi perdida localmente.', 'error', 5000);
+        this.render();
+      }
+    });
   },
 
   openDemandaModal(d=null) {
     UI.modal({
-      title: d ? 'Editar Demanda' : 'Nova Demanda', size:'lg',
+      title: d ? `Editar Demanda #${escapeHTML(d.id)} · ${escapeHTML(d.titulo || 'Sem título')}` : 'Nova Demanda', size:'lg demanda-edit-modal',
       body: UI.demandaForm(d||{}, { defaultCriadoPorId: this.currentUserPessoaId || '' }),
       footer: `<button class="btn" data-close-modal>Cancelar</button><button class="btn btn-primary" id="save"><i class="fa-solid fa-check"></i> Salvar</button>`,
       onOpen: (root, close) => {
@@ -1416,6 +2940,42 @@ const App = {
         // - escolher uma Empresa filtra a lista de Projetos para só os daquela empresa
         //   (e repopula o select de contato/Solicitante).
         const form = root.querySelector('#demandaForm');
+
+        // Navegação por abas do formulário grande: mantém todas as informações
+        // disponíveis sem transformar a edição em uma página longa.
+        const setDemandaEditTab = (tabName) => {
+          root.querySelectorAll('[data-demand-edit-tab]').forEach(btn => {
+            const active = btn.dataset.demandEditTab === tabName;
+            btn.classList.toggle('is-active', active);
+            btn.setAttribute('aria-selected', active ? 'true' : 'false');
+          });
+          root.querySelectorAll('[data-demand-edit-panel]').forEach(panel => {
+            const active = panel.dataset.demandEditPanel === tabName;
+            panel.classList.toggle('is-active', active);
+            panel.hidden = !active;
+          });
+        };
+        root.querySelectorAll('[data-demand-edit-tab]').forEach(btn => {
+          btn.addEventListener('click', () => setDemandaEditTab(btn.dataset.demandEditTab));
+        });
+        setDemandaEditTab('geral');
+
+        const atualizarResumoEdicao = () => {
+          const status = form.querySelector('[name="status"]')?.value || 'backlog';
+          const prioridade = form.querySelector('[name="prioridade"]')?.value || 'normal';
+          const prazo = form.querySelector('[name="prazo"]')?.value || '';
+          const summaryStatus = root.querySelector('[data-summary-status]');
+          const summaryPriority = root.querySelector('[data-summary-priority]');
+          const summaryDeadline = root.querySelector('[data-summary-deadline]');
+          if (summaryStatus) summaryStatus.innerHTML = UI.statusPill(status);
+          if (summaryPriority) summaryPriority.innerHTML = UI.prioPill(prioridade);
+          if (summaryDeadline) summaryDeadline.innerHTML = `<i class="fa-regular fa-calendar"></i> ${escapeHTML(prazo ? fmtDate(prazo) : 'Sem prazo')}`;
+        };
+        form.querySelectorAll('[name="status"], [name="prioridade"], [name="prazo"]').forEach(el => {
+          el.addEventListener('change', atualizarResumoEdicao);
+        });
+        atualizarResumoEdicao();
+        const comentariosEdicao = (d?.comentarios || []).map(c => ({ ...c }));
         const empresaMap = JSON.parse(form.dataset.empresaMap || '{}');
         const projetoEmpresaMap = JSON.parse(form.dataset.projetoEmpresaMap || '{}');
         const projetoClienteMap = JSON.parse(form.dataset.projetoClienteMap || '{}');
@@ -1452,6 +3012,117 @@ const App = {
           };
         };
         ligarToggleExecutante();
+
+        // Editor do checklist dentro da própria edição da demanda. Mantém o mesmo
+        // estado usado no drawer, mas permite criar, concluir e remover itens antes
+        // de salvar a demanda.
+        const checklistEditor = form.querySelector('#demandaChecklistEditor');
+        const limparChecklistVazio = () => {
+          if (!checklistEditor) return;
+          const vazio = checklistEditor.querySelector('.demanda-checklist-empty');
+          const rows = checklistEditor.querySelectorAll('.demanda-checklist-row');
+          if (vazio && rows.length) vazio.remove();
+          if (!rows.length && !vazio) checklistEditor.innerHTML = '<div class="demanda-checklist-empty">Nenhum item no checklist.</div>';
+        };
+        const ligarChecklistRow = (row) => {
+          row.querySelector('.demanda-checklist-remove')?.addEventListener('click', () => {
+            row.remove();
+            limparChecklistVazio();
+          });
+        };
+        checklistEditor?.querySelectorAll('.demanda-checklist-row').forEach(ligarChecklistRow);
+        form.querySelector('#demandaChecklistAdd')?.addEventListener('click', () => {
+          if (!checklistEditor) return;
+          checklistEditor.querySelector('.demanda-checklist-empty')?.remove();
+          const row = document.createElement('div');
+          row.className = 'demanda-checklist-row';
+          row.dataset.checklistId = uid('ck');
+          row.dataset.doneEm = '';
+          row.innerHTML = '<input type="checkbox" class="demanda-checklist-done" aria-label="Concluída"/><input type="text" class="demanda-checklist-text" placeholder="Item do checklist"/><button type="button" class="icon-btn demanda-checklist-remove" title="Remover item"><i class="fa-solid fa-trash"></i></button>';
+          checklistEditor.appendChild(row);
+          ligarChecklistRow(row);
+          row.querySelector('.demanda-checklist-text')?.focus();
+        });
+
+        const renderComentariosEdicao = () => {
+          const list = root.querySelector('#demandaEditComments');
+          if (!list) return;
+          list.innerHTML = comentariosEdicao.length
+            ? comentariosEdicao.map(c => `<div class="comment"><span class="who">${escapeHTML(c.autor || 'Você')}</span><span class="when">${fmtDate(c.data)}</span><div>${escapeHTML(c.texto || '')}</div></div>`).join('')
+            : '<div class="empty demanda-edit-empty">Sem comentários.</div>';
+        };
+
+        root.querySelector('#demandaEditCommentAdd')?.addEventListener('click', () => {
+          const input = root.querySelector('#demandaEditCommentNew');
+          const texto = input?.value.trim();
+          if (!texto) return;
+          comentariosEdicao.push({ id: uid('cm'), autor:'Você', texto, data:new Date().toISOString(), _novoNaEdicao:true });
+          input.value = '';
+          renderComentariosEdicao();
+          input.focus();
+        });
+
+        const renderDocumentosEdicao = (docs) => {
+          const list = root.querySelector('#demandaEditDocs');
+          if (!list) return;
+          list.innerHTML = docs.length
+            ? docs.map(doc => `<div class="comment demanda-edit-doc-item"><i class="fa-solid fa-file"></i><div style="flex:1;min-width:0;"><div class="demanda-edit-doc-name">${escapeHTML(doc.nomeArquivo || 'Arquivo')}</div><div class="demanda-edit-doc-meta">${doc.tamanho ? `${Math.ceil(Number(doc.tamanho)/1024)} KB` : ''}</div></div></div>`).join('')
+            : '<div class="empty demanda-edit-empty">Nenhum documento.</div>';
+        };
+
+        const carregarDocumentosEdicao = async () => {
+          if (!d?.id || typeof Documentos === 'undefined') return;
+          try {
+            const docs = await Documentos.listar(d.id);
+            renderDocumentosEdicao(docs || []);
+          } catch (err) {
+            console.error(err);
+            const list = root.querySelector('#demandaEditDocs');
+            if (list) list.innerHTML = '<div class="empty demanda-edit-empty">Não foi possível carregar os documentos.</div>';
+          }
+        };
+
+        const renderOSDaDemandaEdicao = () => {
+          const list = root.querySelector('#demandaEditOS');
+          if (!list || !d?.id || typeof OSStore === 'undefined') return;
+          const osDaDemanda = OSStore.all().filter(os => os.demandaId === d.id).sort((a,b)=>Number(b.numero||0)-Number(a.numero||0));
+          list.innerHTML = osDaDemanda.length
+            ? osDaDemanda.map(os => `<button type="button" class="btn btn-ghost demanda-edit-os-item" data-os-edit-id="${escapeHTML(os.id)}"><span><strong>OS-${Number(os.numero||0).toString().padStart(5,'0')}</strong> · ${escapeHTML(this.osStatusLabel(os.statusOs))}</span><span>${os.apontamentos?.length||0} apont.</span></button>`).join('')
+            : '<div class="empty demanda-edit-empty">Nenhuma OS vinculada.</div>';
+          list.querySelectorAll('[data-os-edit-id]').forEach(btn => {
+            btn.onclick = () => { close(); this.openOSDrawer(btn.dataset.osEditId); };
+          });
+        };
+
+        carregarDocumentosEdicao();
+        renderOSDaDemandaEdicao();
+
+        const editDocFile = root.querySelector('#demandaEditDocFile');
+        const editDocHint = root.querySelector('#demandaEditDocHint');
+        editDocFile?.addEventListener('change', () => {
+          if (editDocHint) editDocHint.textContent = editDocFile.files[0]?.name || 'Nenhum arquivo selecionado';
+        });
+        root.querySelector('#demandaEditDocAdd')?.addEventListener('click', async () => {
+          if (!d?.id) return UI.toast('Salve a demanda primeiro', 'warn');
+          const file = editDocFile?.files[0];
+          if (!file) return UI.toast('Selecione um arquivo', 'warn');
+          try {
+            await Documentos.upload(d.id, file);
+            if (editDocFile) editDocFile.value = '';
+            if (editDocHint) editDocHint.textContent = 'Nenhum arquivo selecionado';
+            UI.toast('Documento enviado', 'success');
+            carregarDocumentosEdicao();
+          } catch (err) {
+            console.error(err);
+            UI.toast('Falha ao enviar documento', 'error');
+          }
+        });
+
+        root.querySelector('#demandaEditNewOS')?.addEventListener('click', () => {
+          if (!d?.id) return UI.toast('Salve a demanda primeiro', 'warn');
+          close();
+          this.openOSModal(null, d.id);
+        });
 
         // Solicitante: dropdown com os contatos já cadastrados da empresa (mesmo padrão
         // visual dos demais campos), com opção "+ Novo contato..." para digitar um nome novo.
@@ -1537,14 +3208,49 @@ const App = {
           }
           if (!data.criadoPorId) data.criadoPorId = this.currentUserPessoaId || '';
           data.tempoGasto = parseFloat(data.tempoGasto)||0;
+          data.tags = String(data.tags || '')
+            .split(/[,;\n]/)
+            .map(tag => tag.trim())
+            .filter(Boolean)
+            .filter((tag, index, arr) => arr.findIndex(v => v.toLowerCase() === tag.toLowerCase()) === index);
+          delete data.criacaoVisual;
+
+          // O timestamp de criação é histórico e não é alterado pela edição.
+          // O checklist, porém, faz parte da demanda e pode ser mantido/alterado aqui.
+          if (checklistEditor) {
+            data.checklist = Array.from(checklistEditor.querySelectorAll('.demanda-checklist-row'))
+              .map(row => {
+                const texto = row.querySelector('.demanda-checklist-text')?.value.trim() || '';
+                if (!texto) return null;
+                const done = !!row.querySelector('.demanda-checklist-done')?.checked;
+                const previousDoneEm = row.dataset.doneEm || '';
+                return {
+                  id: row.dataset.checklistId || uid('ck'),
+                  texto,
+                  done,
+                  doneEm: done ? (previousDoneEm || new Date().toISOString()) : null
+                };
+              })
+              .filter(Boolean);
+          }
+
+          const novosComentarios = comentariosEdicao.filter(c => c._novoNaEdicao).map(c => { const { _novoNaEdicao, ...rest } = c; return rest; });
+          const comentariosFinais = comentariosEdicao.map(c => { const { _novoNaEdicao, ...rest } = c; return rest; });
+          const historicoAtualizado = [...(d?.historico||[])];
+          if (d) {
+            historicoAtualizado.push({ tipo:'edicao', data:new Date().toISOString(), texto:'Demanda editada' });
+            novosComentarios.forEach(c => historicoAtualizado.push({ tipo:'comentario', data:c.data, texto:'Comentário adicionado' }));
+          } else {
+            historicoAtualizado.push({ tipo:'criacao', data:new Date().toISOString(), texto:'Demanda criada' });
+          }
           const record = {
             id: d?.id,
             ...data,
-            checklist: d?.checklist || [],
-            comentarios: d?.comentarios || [],
+            checklist: data.checklist || [],
+            comentarios: comentariosFinais,
             arquivos: d?.arquivos || [],
             criacao: d?.criacao || new Date().toISOString(),
-            historico: [...(d?.historico||[]), { tipo: d?'edicao':'criacao', data:new Date().toISOString(), texto: d?'Demanda editada':'Demanda criada' }]
+            historico: historicoAtualizado
           };
           Store.upsert('demandas', record);
           close(); UI.toast('Demanda salva','success'); this.render();
@@ -1558,8 +3264,28 @@ const App = {
     Store.upsert('demandas', copy); UI.toast('Demanda duplicada','success'); this.render();
   },
   delDemanda(id) {
-    UI.confirm('Excluir demanda','Esta ação não pode ser desfeita.', () => {
-      Store.remove('demandas', id); UI.toast('Demanda excluída','success'); this.render();
+    const d = Store.demanda(id);
+    if (!d) return;
+    UI.confirm('Excluir demanda','A demanda será removida. Você poderá desfazer a ação por alguns segundos.', async () => {
+      const backup = structuredClone(d);
+      const seq = Store.demandaSeq(id);
+      try {
+        await Store.removeAwait('demandas', id);
+        this.render();
+        UI.toastAction(
+          `Demanda #${seq || '—'} excluída.`,
+          'Desfazer',
+          async () => {
+            Store.upsert('demandas', backup);
+            this.render();
+          },
+          'success',
+          7000
+        );
+      } catch (err) {
+        console.error(err);
+        UI.toast(err?.message || 'Não foi possível excluir a demanda.', 'error', 5000);
+      }
     });
   },
 
@@ -1581,13 +3307,26 @@ const App = {
     UI.drawer({
       title: `#${Store.demandaSeq(d.id)} · ${d.titulo}`,
       body: `
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-          ${UI.statusPill(isLate(d)?'atrasado':d.status)} ${UI.prioPill(d.prioridade)}
-          ${(d.tags||[]).map(t=>`<span class="tag">${escapeHTML(t)}</span>`).join('')}
+        <div class="drawer-summary">
+          <div class="drawer-summary-top">
+            <div>
+              <div class="drawer-summary-id">Demanda #${Store.demandaSeq(d.id)}</div>
+              <div class="drawer-summary-context">${escapeHTML(nomeProjeto(d)||'Sem projeto')} · ${escapeHTML(cli?.empresa||'Sem cliente')}</div>
+            </div>
+            <div class="drawer-summary-pills">${UI.statusPill(isLate(d)?'atrasado':d.status)} ${UI.prioPill(d.prioridade)}</div>
+          </div>
+          <div class="drawer-summary-meta">
+            <span><i class="fa-regular fa-user"></i> ${escapeHTML(nomeResponsavel(d)||'Sem responsável')}</span>
+            <span><i class="fa-regular fa-calendar"></i> ${d.prazo ? fmtDate(d.prazo) : 'Sem prazo'}</span>
+          </div>
+          ${(d.tags||[]).length ? `<div class="drawer-tags">${(d.tags||[]).map(t=>`<span class="tag">${escapeHTML(t)}</span>`).join('')}</div>` : ''}
         </div>
-        <div style="font-size:13px;color:var(--text-2);margin-bottom:10px;">${escapeHTML(d.descricao||'')}</div>
-        ${d.proximosPassos ? `<div style="font-size:13px;margin-bottom:10px;"><b>Próximos passos:</b> ${escapeHTML(d.proximosPassos)}</div>` : ''}
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px;">
+        <div class="drawer-section">
+          <div class="drawer-section-head"><span>Informações</span></div>
+          <div class="drawer-description">${escapeHTML(d.descricao||'') || '<span class="drawer-muted">Sem descrição.</span>'}</div>
+          ${d.proximosPassos ? `<div class="drawer-next-step"><strong>Próximos passos</strong><span>${escapeHTML(d.proximosPassos)}</span></div>` : ''}
+        </div>
+        <div class="drawer-info-grid">
           <div><b>Projeto:</b> ${escapeHTML(nomeProjeto(d)||'—')}</div>
           <div><b>Cliente:</b> ${escapeHTML(cli?.empresa||'—')}</div>
           <div><b>Solicitante:</b> ${escapeHTML(d.solicitanteNome || cli?.contato || cli?.nome || '—')}</div>
@@ -1598,20 +3337,25 @@ const App = {
           <div><b>Criada:</b> ${fmtDate(d.criacao)}</div>
           <div><b>Tempo gasto:</b> ${d.tempoGasto||0}h</div>
         </div>
-        <div class="section-title">Checklist</div>
+        <div class="drawer-section">
+          <div class="drawer-section-head"><span>Checklist</span><span class="drawer-section-count">${(d.checklist||[]).filter(c=>c.done).length}/${(d.checklist||[]).length}</span></div>
         <div id="ck">${checklist}</div>
-        <div style="display:flex;gap:6px;margin-top:8px;">
+        <div class="drawer-inline-input">
           <input id="ckNew" placeholder="Adicionar item..." style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);"/>
           <button class="btn btn-sm btn-primary" id="ckAdd"><i class="fa-solid fa-plus"></i></button>
         </div>
-        <div class="section-title">Comentários</div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-head"><span>Comentários</span><span class="drawer-section-count">${(d.comentarios||[]).length}</span></div>
         <div id="cm">${comments}</div>
-        <div style="display:flex;gap:6px;margin-top:8px;">
+        <div class="drawer-inline-input">
           <input id="cmNew" placeholder="Escrever comentário..." style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);"/>
           <button class="btn btn-sm btn-primary" id="cmAdd"><i class="fa-solid fa-paper-plane"></i></button>
         </div>
-        <div class="section-title">Documentos</div>
-        <div id="docsList"><div class="empty" style="padding:12px">Carregando...</div></div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-head"><span>Documentos</span></div>
+        <div id="docsList">${UI.skeletonList(3, 'drawer-skeleton')}</div>
         <div class="file-upload" style="margin-top:10px;">
           <label class="file-upload-label" for="docFile">
             <i class="fa-solid fa-paperclip"></i> Escolher arquivo
@@ -1620,16 +3364,25 @@ const App = {
           <input type="file" id="docFile"/>
           <button class="btn btn-primary btn-sm" id="docAdd" style="margin-left:auto;"><i class="fa-solid fa-upload"></i> Enviar</button>
         </div>
-        <div class="section-title">Histórico</div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-head"><span>Histórico</span><span class="drawer-section-count">${(d.historico||[]).length}</span></div>
         ${hist || '<div class="empty" style="padding:12px">Sem histórico.</div>'}
-        <div class="section-title">Ordens de Serviço</div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-head"><span>Ordens de Serviço</span><span class="drawer-section-count">${osDaDemanda.length}</span></div>
         <div class="os-integration-banner"><i class="fa-solid fa-screwdriver-wrench"></i><div><strong>${osDaDemanda.length ? `${osDaDemanda.length} OS vinculada(s)` : 'Nenhuma OS vinculada'}</strong><div>Crie uma OS a partir desta demanda para reaproveitar cliente, solicitante e executante.</div></div><button class="btn btn-sm btn-primary" id="btnNovaOSDaDemanda" style="margin-left:auto;white-space:nowrap"><i class="fa-solid fa-plus"></i> Nova OS</button></div>
         ${osDaDemanda.length ? `<div style="display:flex;flex-direction:column;gap:6px;">${osDaDemanda.map(os=>`<button class="btn btn-ghost" data-os-demanda="${os.id}" style="justify-content:space-between;text-align:left;border:1px solid var(--border);"><span><strong>OS-${Number(os.numero||0).toString().padStart(5,'0')}</strong> · ${escapeHTML(this.osStatusLabel(os.statusOs))}</span><span>${os.apontamentos?.length||0} apont.</span></button>`).join('')}</div>` : ''}
-        <div style="display:flex;gap:6px;margin-top:20px;flex-wrap:wrap;">
-          ${onVoltar ? '<button class="btn" id="btnVoltar"><i class="fa-solid fa-arrow-left"></i> Voltar</button>' : ''}
-          <button class="btn" id="btnEdit"><i class="fa-solid fa-pen"></i> Editar</button>
-          <button class="btn" id="btnDup"><i class="fa-solid fa-copy"></i> Duplicar</button>
-          <button class="btn btn-danger" id="btnDel"><i class="fa-solid fa-trash"></i> Excluir</button>
+        </div>
+        <div class="drawer-actions">
+          <div class="drawer-actions-main">
+            ${onVoltar ? '<button class="btn" id="btnVoltar"><i class="fa-solid fa-arrow-left"></i> Voltar</button>' : ''}
+            <button class="btn btn-primary" id="btnEdit"><i class="fa-solid fa-pen"></i> Editar demanda</button>
+          </div>
+          <div class="drawer-actions-secondary">
+            <button class="btn btn-sm" id="btnDup"><i class="fa-solid fa-copy"></i> Duplicar</button>
+            <button class="btn btn-sm btn-danger" id="btnDel"><i class="fa-solid fa-trash"></i> Excluir</button>
+          </div>
         </div>`,
       onOpen: (root, close) => {
         this.carregarDocumentosDemanda(root, id);
@@ -1826,22 +3579,94 @@ const App = {
     function cardHTML(d) {
       const resp = Store.pessoa(d.responsavelId);
       const cli = Store.cliente(d.clienteId);
+      const responsavel = nomeResponsavel(d) || resp?.nome || 'Sem responsável';
+      const tags = Array.isArray(d.tags) ? d.tags.filter(Boolean) : [];
+      const prazoIso = d.prazo ? isoDay(d.prazo) : '';
+      let prazoInfo = '';
+      let prazoClass = '';
+      if (prazoIso) {
+        const hojeIso = isoDay(today());
+        const prazoDate = new Date(`${prazoIso}T00:00:00`);
+        const hojeDate = new Date(`${hojeIso}T00:00:00`);
+        const diff = Math.round((prazoDate - hojeDate) / 86400000);
+        if (!Number.isNaN(diff)) {
+          if (diff < 0 && !['concluido','cancelado'].includes(d.status)) {
+            const atraso = Math.abs(diff);
+            prazoInfo = `Atrasado ${atraso} ${atraso === 1 ? 'dia' : 'dias'}`;
+            prazoClass = 'is-late';
+          } else if (diff === 0) {
+            prazoInfo = 'Vence hoje';
+            prazoClass = 'is-today';
+          } else if (diff === 1) {
+            prazoInfo = '1 dia restante';
+            prazoClass = 'is-soon';
+          } else {
+            prazoInfo = `${diff} dias restantes`;
+          }
+        }
+      }
+
       return `<div class="k-card" draggable="true" data-id="${d.id}">
+        <div class="k-card-head">
+          <span class="k-card-id">#${Store.demandaSeq(d.id) || d.id}</span>
+          <button class="icon-btn k-card-open" data-open="${d.id}" title="Ver demanda" aria-label="Ver demanda #${Store.demandaSeq(d.id) || d.id}"><i class="fa-solid fa-eye"></i></button>
+        </div>
         <div class="k-card-title">${escapeHTML(d.titulo)}</div>
-        <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">${escapeHTML(cli?.empresa||'')}</div>
+        <div class="k-card-client">${escapeHTML(cli?.empresa || 'Sem cliente')}</div>
+        <div class="k-card-assignee">
+          <span class="avatar k-card-avatar">${initials(responsavel)}</span>
+          <span>${escapeHTML(responsavel)}</span>
+        </div>
         <div class="k-card-meta">
           <span>${UI.prioPill(d.prioridade)}</span>
-          <span>${fmtDate(d.prazo)}</span>
+          <span class="k-card-date"><i class="fa-regular fa-calendar"></i> ${d.prazo ? fmtDate(d.prazo) : 'Sem prazo'}</span>
         </div>
-        ${d.equipeArea ? `<div style="margin-top:6px;">${UI.equipeAreaPill(d.equipeArea)}</div>` : ''}
-        <div class="k-card-tags">${(d.tags||[]).map(t=>`<span class="k-tag">${escapeHTML(t)}</span>`).join('')}</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
-          <div class="avatar" style="width:24px;height:24px;font-size:10px">${initials(nomeResponsavel(d)||'?')}</div>
-          <button class="icon-btn" style="width:26px;height:26px;" data-open="${d.id}"><i class="fa-solid fa-eye" style="font-size:11px"></i></button>
+        ${prazoInfo ? `<div class="k-card-deadline ${prazoClass}"><i class="fa-solid fa-triangle-exclamation"></i><span>${escapeHTML(prazoInfo)}</span></div>` : ''}
+        <div class="k-card-footer">
+          ${d.equipeArea ? UI.equipeAreaPill(d.equipeArea) : '<span></span>'}
+          ${tags.length ? `<div class="k-card-tags">${tags.slice(0,3).map(t=>`<span class="k-tag">${escapeHTML(t)}</span>`).join('')}${tags.length > 3 ? `<span class="k-tag k-tag-more">+${tags.length - 3}</span>` : ''}</div>` : '<span></span>'}
         </div>
       </div>`;
     }
   },
+  confirmKanbanMove(d, newStatus, onConfirm) {
+    const oldStatus = d.status || 'backlog';
+    const oldLabel = STATUS[oldStatus]?.label || oldStatus;
+    const newLabel = STATUS[newStatus]?.label || newStatus;
+    const isConsequence = ['concluido', 'cancelado'].includes(newStatus);
+    const title = isConsequence ? 'Confirmar mudança de status' : 'Confirmar movimentação';
+    const body = `
+      <div class="kanban-move-confirm">
+        <div class="kanban-move-demand">
+          <span class="kanban-move-id">#${escapeHTML(String(Store.demandaSeq(d.id) || d.id))}</span>
+          <strong>${escapeHTML(d.titulo || 'Demanda sem título')}</strong>
+        </div>
+        <div class="kanban-move-transition" aria-label="Alteração de status">
+          <div class="kanban-move-status">
+            <span class="dot" style="background:${STATUS[oldStatus]?.color || 'var(--text-2)'}"></span>
+            <span>${escapeHTML(oldLabel)}</span>
+          </div>
+          <i class="fa-solid fa-arrow-right"></i>
+          <div class="kanban-move-status ${isConsequence ? 'is-consequence' : ''}">
+            <span class="dot" style="background:${STATUS[newStatus]?.color || 'var(--primary)'}"></span>
+            <span>${escapeHTML(newLabel)}</span>
+          </div>
+        </div>
+        <p class="kanban-move-message">${isConsequence ? 'Essa mudança altera o status da demanda e pode encerrar ou cancelar o fluxo atual.' : `Mover esta demanda para <strong>${escapeHTML(newLabel)}</strong>?`}</p>
+      </div>`;
+    const confirmClass = isConsequence ? 'btn btn-danger' : 'btn btn-primary';
+    UI.modal({
+      title,
+      size:'sm',
+      body,
+      footer:`<button class="btn" data-a="cancel">Cancelar</button><button class="${confirmClass}" data-a="move"><i class="fa-solid fa-arrow-right"></i> Mover</button>`,
+      onOpen:(root, close) => {
+        root.querySelector('[data-a="cancel"]').onclick = close;
+        root.querySelector('[data-a="move"]').onclick = () => { close(); onConfirm?.(); };
+      }
+    });
+  },
+
   bindKanbanDrag(onChange) {
     const doRender = onChange || (() => this.render());
     const kb = $('#kb'); if (!kb) return;
@@ -1894,11 +3719,27 @@ const App = {
         const d = Store.demanda(dragId); if (!d) return;
         const newStatus = list.dataset.status;
         if (d.status !== newStatus) {
-          d.historico = d.historico || [];
-          d.historico.push({ tipo:'status', data:new Date().toISOString(), texto:`Status alterado: ${STATUS[d.status].label} → ${STATUS[newStatus].label}` });
-          d.status = newStatus;
-          Store.upsert('demandas', d); UI.toast('Status atualizado','success');
-          doRender();
+          // A mudança de coluna altera o status da demanda. Confirmamos a ação
+          // antes de persistir para evitar alterações acidentais no drag & drop.
+          finishDrag();
+          this.confirmKanbanMove(d, newStatus, () => {
+            const previous = structuredClone(d);
+            d.historico = d.historico || [];
+            d.historico.push({ tipo:'status', data:new Date().toISOString(), texto:`Status alterado: ${STATUS[d.status].label} → ${STATUS[newStatus].label}` });
+            d.status = newStatus;
+            Store.upsert('demandas', d);
+            doRender();
+            UI.toastAction(
+              `Demanda movida para ${STATUS[newStatus].label}.`,
+              'Desfazer',
+              async () => {
+                Store.upsert('demandas', previous);
+                doRender();
+              },
+              'success',
+              5500
+            );
+          });
         }
       });
     });
@@ -2357,10 +4198,7 @@ const App = {
     // cabeçalho (nome, período, status) e as demandas dele listadas embaixo,
     // ordenadas por prazo. Demandas sem projeto (ou com um dos valores
     // especiais tipo "Fora do escopo") caem num bloco à parte no final.
-    const statusChip = (st) => {
-      const s = STATUS[st] || STATUS.backlog;
-      return `<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:700;background:${s.color}1a;color:${s.color};white-space:nowrap;"><span style="width:6px;height:6px;border-radius:50%;background:${s.color};display:inline-block;"></span>${escapeHTML(s.label)}</span>`;
-    };
+    const statusChip = (st) => UI.statusPill(st);
 
     const demandasPorProjeto = {};
     const demandasSemProjeto = [];
@@ -2401,7 +4239,10 @@ const App = {
       <div style="border:1px solid #e3e5e9;border-radius:10px;margin-bottom:14px;overflow:hidden;page-break-inside:avoid;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:#f7f8fa;border-bottom:${dems.length ? '1px solid #e3e5e9' : 'none'};">
           <div style="min-width:0;">
-            <div style="font-size:13.5px;font-weight:700;color:#111;">${escapeHTML(p.nome)}</div>
+            <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:13.5px;font-weight:700;color:#111;">
+              <span>${escapeHTML(p.nome)}</span>
+              <span style="font-size:11px;font-weight:600;color:#666;">${p.inicio && p.prazo ? `${fmtDate(p.inicio)} → ${fmtDate(p.prazo)}` : (p.inicio ? `Início ${fmtDate(p.inicio)}` : (p.prazo ? `Prazo ${fmtDate(p.prazo)}` : 'Sem data'))}</span>
+            </div>
             <div style="font-size:11px;color:#888;margin-top:2px;">Início: ${fmtDate(p.inicio)} · Prazo: ${fmtDate(p.prazo)}${dems.length ? ` · ${concluidas}/${dems.length} demanda(s) concluída(s)` : ''}</div>
           </div>
           ${statusChip(p.status)}
@@ -2422,7 +4263,7 @@ const App = {
       <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:16px;margin-bottom:20px;border-bottom:2px solid #6366f1;">
         <div>
           <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8b5cf6;font-weight:700;">FlowDesk · Cronograma</div>
-          <div style="font-size:19px;font-weight:800;color:#111;margin-top:2px;">${escapeHTML(nomeEmpresa)}</div>
+          <div style="font-size:19px;font-weight:800;color:#111;margin-top:2px;">${escapeHTML(nomeEmpresa)}${menorData && maiorData ? ` · ${fmtDate(menorData)} → ${fmtDate(maiorData)}` : ''}</div>
         </div>
         <div style="text-align:right;font-size:11.5px;color:#777;">
           <div>Período: <strong style="color:#333;">${fmtDate(menorData)} — ${fmtDate(maiorData)}</strong></div>
@@ -3087,6 +4928,20 @@ const App = {
     });
   },
 
+  exportSelectedDemandasCSV() {
+    const selected = this.getSelectedDemandas();
+    if (!selected.length) return UI.toast('Selecione pelo menos uma demanda.', 'warn');
+    const rows = selected.map(d => ({
+      titulo:d.titulo, projeto:nomeProjeto(d)||'',
+      cliente:Store.cliente(d.clienteId)?.empresa||'', responsavel:nomeResponsavel(d)||'',
+      equipe:EQUIPE_AREA[d.equipeArea]?.label||'',
+      status:STATUS[d.status]?.label, prioridade:PRIORIDADE[d.prioridade]?.label,
+      criacao:fmtDate(d.criacao), prazo:fmtDate(d.prazo), tempoGasto:d.tempoGasto,
+      tags:(d.tags||[]).join(', ')
+    }));
+    download('demandas-selecionadas.csv', toCSV(rows), 'text/csv');
+    UI.toast(`${selected.length} demanda(s) exportada(s).`, 'success');
+  },
   exportDemandsCSV() {
     const rows = Store.demandas().map(d => ({
       titulo:d.titulo, projeto:nomeProjeto(d)||'',
@@ -3746,4 +5601,8 @@ const TransicaoCS = {
   }
 };
 
-document.addEventListener('DOMContentLoaded', () => App.init());
+document.addEventListener('DOMContentLoaded', () => {
+  TableResizer.init();
+  window.FlowTable?.init();
+  App.init();
+});
