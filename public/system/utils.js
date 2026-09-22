@@ -40,14 +40,16 @@ const addDays = (d, n) => { const x = parseLocalDate(d); x.setDate(x.getDate()+n
 
 
 const STATUS = {
-  backlog:      { label:'Backlog',            className:'backlog',   color:'#94a3b8' },
-  analise:      { label:'Em análise',         className:'analise',   color:'#0ea5e9' },
-  dev:          { label:'Em desenvolvimento', className:'dev',       color:'#6366f1' },
-  revisao:      { label:'Em revisão',         className:'revisao',   color:'#a855f7' },
-  cliente:      { label:'Aguardando Cliente', className:'cliente',   color:'#f59e0b' },
-  concluido:    { label:'Concluído',          className:'concluido', color:'#10b981' },
-  cancelado:    { label:'Cancelado',          className:'cancelado', color:'#64748b' },
-  atrasado:     { label:'Atrasado',           className:'atrasado',  color:'#ef4444' },
+  // Paleta semântica global de status. O mesmo status usa a mesma cor em
+  // tabela, drawer, formulário, dashboard, Kanban e relatórios.
+  backlog:      { label:'Backlog',             className:'backlog',   color:'#64748b' },
+  analise:      { label:'Em análise',          className:'analise',   color:'#2563eb' },
+  dev:          { label:'Em desenvolvimento',  className:'dev',       color:'#7c3aed' },
+  revisao:      { label:'Em revisão',          className:'revisao',   color:'#a855f7' },
+  cliente:      { label:'Aguardando cliente',  className:'cliente',   color:'#d97706' },
+  concluido:    { label:'Concluído',           className:'concluido', color:'#16a34a' },
+  cancelado:    { label:'Cancelado',           className:'cancelado', color:'#64748b' },
+  atrasado:     { label:'Atrasado',            className:'atrasado',  color:'#dc2626' },
 };
 const STATUS_ORDER = ['backlog','analise','dev','revisao','cliente','concluido','cancelado','atrasado'];
 
