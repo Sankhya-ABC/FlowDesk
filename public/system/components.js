@@ -8,8 +8,58 @@ UI.toast = function(msg, type='info', ms=3000) {
   const icon = { success:'check-circle', warn:'triangle-exclamation', error:'circle-xmark', info:'circle-info' }[type] || 'circle-info';
   el.innerHTML = `<i class="fa-solid fa-${icon}"></i><div class="msg">${escapeHTML(msg)}</div>`;
   root.appendChild(el);
-  setTimeout(()=> { el.style.opacity='0'; el.style.transform='translateX(20px)'; el.style.transition='.3s'; }, ms-300);
+  setTimeout(()=> { el.style.opacity='0'; el.style.transform='translateX(20px)'; el.style.transition='.3s'; }, Math.max(0, ms-300));
   setTimeout(()=> el.remove(), ms);
+  return el;
+};
+
+// Toast com ação temporária, usado em operações que o usuário pode desfazer.
+// A ação desaparece junto com o toast e só pode ser acionada uma vez.
+UI.toastAction = function(msg, actionLabel, onAction, type='success', ms=6000) {
+  const root = $('#toastRoot');
+  const el = document.createElement('div');
+  el.className = `toast ${type} toast-action`;
+  const icon = { success:'check-circle', warn:'triangle-exclamation', error:'circle-xmark', info:'circle-info' }[type] || 'check-circle';
+  el.innerHTML = `
+    <i class="fa-solid fa-${icon}"></i>
+    <div class="msg">${escapeHTML(msg)}</div>
+    <button type="button" class="toast-action-btn">${escapeHTML(actionLabel)}</button>`;
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(20px)';
+    el.style.transition = '.25s';
+    setTimeout(() => el.remove(), 260);
+  };
+
+  el.querySelector('.toast-action-btn').onclick = async () => {
+    if (closed) return;
+    closed = true;
+    const btn = el.querySelector('.toast-action-btn');
+    btn.disabled = true;
+    btn.textContent = 'Desfazendo…';
+    try {
+      await onAction?.();
+      el.querySelector('.msg').textContent = 'Ação desfeita.';
+    } catch (err) {
+      console.error(err);
+      el.querySelector('.msg').textContent = 'Não foi possível desfazer a ação.';
+      btn.remove();
+      closed = false;
+      setTimeout(close, 2200);
+      return;
+    }
+    btn.remove();
+    setTimeout(close, 1200);
+  };
+
+  root.appendChild(el);
+  const fadeTimer = setTimeout(close, ms);
+  el._toastFadeTimer = fadeTimer;
+  return { close };
 };
 
 UI.confirm = function(title, message, onOk) {
@@ -56,24 +106,28 @@ UI.modal = function({ title, body, size='', footer, onOpen }) {
 UI.drawer = function({ title, body, onOpen }) {
   const root = $('#modalRoot');
   root.innerHTML = `
-    <div class="drawer-backdrop"></div>
-    <aside class="drawer">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <h3>${escapeHTML(title)}</h3>
-        <button class="icon-btn" data-close><i class="fa-solid fa-xmark"></i></button>
+    <div class="drawer-backdrop" data-drawer-backdrop></div>
+    <aside class="drawer" role="dialog" aria-modal="true" aria-label="${escapeHTML(title)}">
+      <div class="drawer-head">
+        <div class="drawer-head-main">
+          <div class="drawer-kicker">Detalhes</div>
+          <h3>${escapeHTML(title)}</h3>
+        </div>
+        <button class="icon-btn" data-close aria-label="Fechar detalhes"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <div id="drawer-body">${body}</div>
+      <div class="drawer-body" id="drawer-body">${body}</div>
     </aside>`;
   const close = () => root.innerHTML = '';
   root.querySelector('[data-close]').onclick = close;
-  root.querySelector('.drawer-backdrop').onclick = close;
+  root.querySelector('[data-drawer-backdrop]').onclick = close;
+  document.addEventListener('keydown', function esc(e){ if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
   onOpen && onOpen(root, close);
   return { close };
 };
 
 UI.statusPill = (s) => {
   const st = STATUS[s] || STATUS.backlog;
-  return `<span class="status ${st.className}"><span class="dot" style="background:${st.color}"></span>${st.label}</span>`;
+  return `<span class="status ${st.className}" data-status="${escapeHTML(st.className)}" title="Status: ${escapeHTML(st.label)}"><span class="status-dot" aria-hidden="true"></span>${escapeHTML(st.label)}</span>`;
 };
 UI.prioPill = (p) => {
   const pr = PRIORIDADE[p] || PRIORIDADE.normal;
@@ -90,8 +144,16 @@ UI.select = (name, options, selected, extra='') =>
     `<option value="${escapeHTML(o.value)}" ${o.value===selected?'selected':''}>${escapeHTML(o.label)}</option>`
   ).join('')}</select>`;
 
-UI.emptyState = (icon='inbox', text='Nada por aqui ainda.') =>
-  `<div class="empty"><i class="fa-solid fa-${icon}"></i><div>${escapeHTML(text)}</div></div>`;
+UI.emptyState = (icon='inbox', text='Nada por aqui ainda.', options={}) => {
+  const description = options?.description ? `<div class="empty-description">${escapeHTML(options.description)}</div>` : '';
+  const action = options?.action?.label ? `<button type="button" class="btn btn-primary empty-action" data-empty-action="${escapeHTML(options.action.key || '')}"><i class="fa-solid fa-${escapeHTML(options.action.icon || 'plus')}"></i>${escapeHTML(options.action.label)}</button>` : '';
+  return `<div class="empty ${options?.compact ? 'empty-compact' : ''}">
+    <div class="empty-icon" aria-hidden="true"><i class="fa-solid fa-${escapeHTML(icon)}"></i></div>
+    <div class="empty-title">${escapeHTML(text)}</div>
+    ${description}
+    ${action}
+  </div>`;
+};
 
 UI.skeletonRows = (n=5, cols=6) => {
   let out='';
@@ -102,6 +164,26 @@ UI.skeletonRows = (n=5, cols=6) => {
   }
   return out;
 };
+
+UI.skeletonKpis = (n=6) => Array.from({length:n}, () => `
+  <div class="kpi skeleton-kpi" aria-hidden="true">
+    <div class="skeleton skeleton-kpi-label"></div>
+    <div class="skeleton skeleton-kpi-icon"></div>
+    <div class="skeleton skeleton-kpi-value"></div>
+    <div class="skeleton skeleton-kpi-hint"></div>
+  </div>`).join('');
+
+UI.skeletonList = (n=3, className='') => `
+  <div class="skeleton-list ${escapeHTML(className)}" aria-label="Carregando conteúdo" aria-busy="true">
+    ${Array.from({length:n}, () => `
+      <div class="skeleton-list-row">
+        <div class="skeleton skeleton-list-icon"></div>
+        <div class="skeleton-list-content">
+          <div class="skeleton skeleton-list-line skeleton-list-line-main"></div>
+          <div class="skeleton skeleton-list-line skeleton-list-line-meta"></div>
+        </div>
+      </div>`).join('')}
+  </div>`;
 
 /* ---------- Forms ---------- */
 UI.clienteForm = (c={}) => `
@@ -407,50 +489,157 @@ UI.demandaForm = (d={}, opts={}) => {
   // "Criado por" (equipe): em edição usa o valor já salvo na demanda; em demanda nova,
   // pré-seleciona o usuário logado (se ele tiver um registro correspondente em equipe).
   const criadoPorId = d.criadoPorId || (!d.id ? (opts.defaultCriadoPorId || '') : '');
+  const tagsValor = Array.isArray(d.tags) ? d.tags.join(', ') : (d.tags || '');
+  const criadaValor = d.criacao ? fmtDate(d.criacao) : '—';
+
+  const comentarioCount = (d.comentarios || []).length;
+  const historicoCount = (d.historico || []).length;
+  const osCount = d.id && typeof OSStore !== 'undefined' ? OSStore.all().filter(os => os.demandaId === d.id).length : 0;
+  const projetoResumo = projetoAtual?.nome || 'Sem projeto';
+  const clienteResumo = clienteAtual?.empresa || empresaAtual || 'Sem cliente';
+  const responsavelResumo = d.responsavelNome || (d.responsavelId ? (Store.equipe().find(e => e.id === d.responsavelId)?.nome || 'Sem executante') : 'Sem executante');
+  const prazoResumo = d.prazo ? fmtDate(d.prazo) : 'Sem prazo';
+  const statusResumo = d.status || 'backlog';
+  const prioridadeResumo = d.prioridade || 'normal';
 
   return `
-  <form id="demandaForm" class="form-grid" data-empresa-map='${mapaJson}' data-projeto-empresa-map='${projetoEmpresaMapJson}' data-projeto-cliente-map='${projetoClienteMapJson}' data-empresa-projetos-map='${empresaProjetosMapJson}' data-todos-projetos='${todosProjetosJson}'>
-    <div class="field full"><label>Título *</label><input name="titulo" required value="${escapeHTML(d.titulo||'')}"/></div>
-    <div class="field"><label>Projeto</label>${UI.select('projetoId',[{value:'',label:'—'},...PROJETO_ESPECIAIS,...projOptsFiltrados], d.projetoId||'')}</div>
-    <div class="field"><label>Cliente (Empresa)</label>${UI.select('empresaSelecionada',[{value:'',label:'—'},...cliOpts], empresaAtual)}</div>
-    <div class="field" id="solicitanteField">
-      <label>Solicitante (Contato)</label>
-      ${(() => {
-        const nomeAtual = d.solicitanteNome || (clienteAtual ? (clienteAtual.contato || clienteAtual.nome || '') : '');
-        const idAtual = d.clienteId || '';
-        // idBatido: o contato salvo/atual está entre os contatos conhecidos da empresa?
-        const idBatido = idAtual && solicOpts.some(o => o.value === idAtual);
-        if (solicOpts.length) {
-          // Empresa com contatos cadastrados: dropdown no mesmo padrão dos demais campos.
-          const opts = [{ value:'', label:'—' }, ...solicOpts, { value:'__novo', label:'+ Novo contato...' }];
-          const selecionado = idBatido ? idAtual : (nomeAtual ? '__novo' : '');
-          return `${UI.select('solicitanteNome', opts, selecionado)}
-            <input name="solicitanteNomeLivre" placeholder="Nome do novo contato" style="margin-top:8px;${selecionado==='__novo'?'':'display:none'}" value="${escapeHTML(selecionado==='__novo' ? nomeAtual : '')}"/>`;
-        }
-        // Empresa sem contatos cadastrados ainda: só texto livre.
-        return `<input name="solicitanteNome" placeholder="Nome do contato" value="${escapeHTML(nomeAtual)}"/>`;
-      })()}
-      <input type="hidden" name="clienteId" value="${escapeHTML(d.clienteId||'')}"/>
+  <form id="demandaForm" class="demanda-edit-shell" data-empresa-map='${mapaJson}' data-projeto-empresa-map='${projetoEmpresaMapJson}' data-projeto-cliente-map='${projetoClienteMapJson}' data-empresa-projetos-map='${empresaProjetosMapJson}' data-todos-projetos='${todosProjetosJson}'>
+    <div class="demanda-edit-sticky-head">
+      <div class="demanda-edit-summary">
+        <div class="demanda-edit-summary-main">
+          <div class="demanda-edit-summary-title">${d.id ? `#${escapeHTML(d.id)} · ` : ''}${escapeHTML(d.titulo || 'Nova demanda')}</div>
+          <div class="demanda-edit-summary-subtitle">${escapeHTML(projetoResumo)} · ${escapeHTML(clienteResumo)} · ${escapeHTML(responsavelResumo)}</div>
+        </div>
+        <div class="demanda-edit-summary-meta" id="demandaEditSummaryMeta">
+          <span data-summary-status>${UI.statusPill(statusResumo)}</span>
+          <span data-summary-priority>${UI.prioPill(prioridadeResumo)}</span>
+          <span data-summary-deadline><i class="fa-regular fa-calendar"></i> ${escapeHTML(prazoResumo)}</span>
+        </div>
+      </div>
+
+      <div class="demanda-edit-tabs" role="tablist" aria-label="Seções da demanda">
+        <button type="button" class="demanda-edit-tab is-active" role="tab" aria-selected="true" data-demand-edit-tab="geral"><i class="fa-regular fa-file-lines"></i> Geral</button>
+        <button type="button" class="demanda-edit-tab" role="tab" aria-selected="false" data-demand-edit-tab="checklist"><i class="fa-regular fa-square-check"></i> Checklist</button>
+        <button type="button" class="demanda-edit-tab" role="tab" aria-selected="false" data-demand-edit-tab="atividade"><i class="fa-regular fa-comments"></i> Atividade <span class="demanda-edit-tab-count">${comentarioCount}</span></button>
+        <button type="button" class="demanda-edit-tab" role="tab" aria-selected="false" data-demand-edit-tab="documentos"><i class="fa-regular fa-folder-open"></i> Documentos</button>
+        <button type="button" class="demanda-edit-tab" role="tab" aria-selected="false" data-demand-edit-tab="os"><i class="fa-solid fa-screwdriver-wrench"></i> Ordens de Serviço <span class="demanda-edit-tab-count">${osCount}</span></button>
+      </div>
     </div>
-    <div class="field" id="executanteField">
-      <label>Executante</label>
-      ${(() => {
-        const idAtual = d.responsavelId || '';
-        const nomeAtual = d.responsavelNome || '';
-        const opts = [{ value:'', label:'—' }, ...respOpts, { value:'__novo', label:'+ Outro (digitar nome)...' }];
-        const selecionado = idAtual ? idAtual : (nomeAtual ? '__novo' : '');
-        return `${UI.select('responsavelId', opts, selecionado)}
-          <input name="responsavelNomeLivre" placeholder="Nome do executante (ex: terceiro, contato do cliente)" style="margin-top:8px;${selecionado==='__novo'?'':'display:none'}" value="${escapeHTML(selecionado==='__novo' ? nomeAtual : '')}"/>`;
-      })()}
-    </div>
-    <div class="field"><label>Criado por</label>${UI.select('criadoPorId',[{value:'',label:'—'},...respOpts], criadoPorId)}</div>
-    <div class="field"><label>Equipe</label>${UI.select('equipeArea',[{value:'',label:'—'},...Object.keys(EQUIPE_AREA).map(k=>({value:k,label:EQUIPE_AREA[k].label}))], d.equipeArea||'')}</div>
-    <div class="field"><label>Status</label>${UI.select('status',stOpts,d.status||'backlog')}</div>
-    <div class="field"><label>Prioridade</label>${UI.select('prioridade',prOpts,d.prioridade||'normal')}</div>
-    <div class="field"><label>Prazo</label><input type="date" name="prazo" value="${d.prazo?isoDay(d.prazo):''}"/></div>
-    <div class="field"><label>Tempo gasto (h)</label><input type="number" min="0" step="0.5" name="tempoGasto" value="${d.tempoGasto||0}"/></div>
-    <div class="field full"><label>Descrição</label><textarea name="descricao">${escapeHTML(d.descricao||'')}</textarea></div>
-    <div class="field full"><label>Próximos passos</label><textarea name="proximosPassos" placeholder="O que vamos fazer">${escapeHTML(d.proximosPassos||'')}</textarea></div>
+
+    <section class="demanda-edit-panel is-active" role="tabpanel" data-demand-edit-panel="geral">
+      <div class="form-grid">
+        <div class="field full"><label>Título *</label><input name="titulo" required value="${escapeHTML(d.titulo||'')}"/></div>
+        <div class="field"><label>Projeto</label>${UI.select('projetoId',[{value:'',label:'—'},...PROJETO_ESPECIAIS,...projOptsFiltrados], d.projetoId||'')}</div>
+        <div class="field"><label>Cliente (Empresa)</label>${UI.select('empresaSelecionada',[{value:'',label:'—'},...cliOpts], empresaAtual)}</div>
+        <div class="field" id="solicitanteField">
+          <label>Solicitante (Contato)</label>
+          ${(() => {
+            const nomeAtual = d.solicitanteNome || (clienteAtual ? (clienteAtual.contato || clienteAtual.nome || '') : '');
+            const idAtual = d.clienteId || '';
+            const idBatido = idAtual && solicOpts.some(o => o.value === idAtual);
+            if (solicOpts.length) {
+              const opts = [{ value:'', label:'—' }, ...solicOpts, { value:'__novo', label:'+ Novo contato...' }];
+              const selecionado = idBatido ? idAtual : (nomeAtual ? '__novo' : '');
+              return `${UI.select('solicitanteNome', opts, selecionado)}
+                <input name="solicitanteNomeLivre" placeholder="Nome do novo contato" style="margin-top:8px;${selecionado==='__novo'?'':'display:none'}" value="${escapeHTML(selecionado==='__novo' ? nomeAtual : '')}"/>`;
+            }
+            return `<input name="solicitanteNome" placeholder="Nome do contato" value="${escapeHTML(nomeAtual)}"/>`;
+          })()}
+          <input type="hidden" name="clienteId" value="${escapeHTML(d.clienteId||'')}"/>
+        </div>
+        <div class="field" id="executanteField">
+          <label>Executante</label>
+          ${(() => {
+            const idAtual = d.responsavelId || '';
+            const nomeAtual = d.responsavelNome || '';
+            const opts = [{ value:'', label:'—' }, ...respOpts, { value:'__novo', label:'+ Outro (digitar nome)...' }];
+            const selecionado = idAtual ? idAtual : (nomeAtual ? '__novo' : '');
+            return `${UI.select('responsavelId', opts, selecionado)}
+              <input name="responsavelNomeLivre" placeholder="Nome do executante (ex: terceiro, contato do cliente)" style="margin-top:8px;${selecionado==='__novo'?'':'display:none'}" value="${escapeHTML(selecionado==='__novo' ? nomeAtual : '')}"/>`;
+          })()}
+        </div>
+        <div class="field"><label>Criado por</label>${UI.select('criadoPorId',[{value:'',label:'—'},...respOpts], criadoPorId)}</div>
+        <div class="field"><label>Equipe</label>${UI.select('equipeArea',[{value:'',label:'—'},...Object.keys(EQUIPE_AREA).map(k=>({value:k,label:EQUIPE_AREA[k].label}))], d.equipeArea||'')}</div>
+        <div class="field"><label>Status</label>${UI.select('status',stOpts,d.status||'backlog')}</div>
+        <div class="field"><label>Prioridade</label>${UI.select('prioridade',prOpts,d.prioridade||'normal')}</div>
+        <div class="field"><label>Prazo</label><input type="date" name="prazo" value="${d.prazo?isoDay(d.prazo):''}"/></div>
+        <div class="field"><label>Tempo gasto (h)</label><input type="number" min="0" step="0.5" name="tempoGasto" value="${d.tempoGasto||0}"/></div>
+        <div class="field"><label>Criada</label><input value="${escapeHTML(criadaValor)}" readonly aria-readonly="true" title="Data de criação da demanda"/></div>
+        <div class="field"><label>Tags</label><input name="tags" value="${escapeHTML(tagsValor)}" placeholder="Ex.: urgente, cliente, financeiro"/></div>
+        <div class="field full"><label>Descrição</label><textarea name="descricao">${escapeHTML(d.descricao||'')}</textarea></div>
+        <div class="field full"><label>Próximos passos</label><textarea name="proximosPassos" placeholder="O que vamos fazer">${escapeHTML(d.proximosPassos||'')}</textarea></div>
+      </div>
+    </section>
+
+    <section class="demanda-edit-panel" role="tabpanel" data-demand-edit-panel="checklist" hidden>
+      <div class="demanda-edit-panel-head">
+        <div><strong>Checklist da demanda</strong><span>Organize tarefas e acompanhe o que já foi concluído.</span></div>
+        <button type="button" class="btn btn-sm demanda-checklist-add" id="demandaChecklistAdd"><i class="fa-solid fa-plus"></i> Adicionar item</button>
+      </div>
+      <div id="demandaChecklistEditor" class="demanda-checklist-editor">
+        ${(d.checklist||[]).map(item => `
+          <div class="demanda-checklist-row" data-checklist-id="${escapeHTML(item.id || uid('ck'))}" data-done-em="${escapeHTML(item.doneEm || '')}">
+            <input type="checkbox" class="demanda-checklist-done" ${item.done?'checked':''} aria-label="Concluída"/>
+            <input type="text" class="demanda-checklist-text" value="${escapeHTML(item.texto||'')}" placeholder="Item do checklist"/>
+            <button type="button" class="icon-btn demanda-checklist-remove" title="Remover item"><i class="fa-solid fa-trash"></i></button>
+          </div>`).join('') || '<div class="demanda-checklist-empty">Nenhum item no checklist.</div>'}
+      </div>
+    </section>
+
+    <section class="demanda-edit-panel" role="tabpanel" data-demand-edit-panel="atividade" hidden>
+      <div class="demanda-edit-two-sections">
+        <div class="demanda-edit-record-section">
+          <div class="section-title">Comentários</div>
+          <div id="demandaEditComments" class="demanda-edit-record-list">
+            ${(d.comentarios||[]).map(c => `
+              <div class="comment">
+                <span class="who">${escapeHTML(c.autor||'Você')}</span>
+                <span class="when">${fmtDate(c.data)}</span>
+                <div>${escapeHTML(c.texto||'')}</div>
+              </div>`).join('') || '<div class="empty demanda-edit-empty">Sem comentários.</div>'}
+          </div>
+          <div class="demanda-edit-inline-input">
+            <input id="demandaEditCommentNew" placeholder="Escrever comentário..."/>
+            <button type="button" class="btn btn-primary" id="demandaEditCommentAdd"><i class="fa-solid fa-paper-plane"></i></button>
+          </div>
+        </div>
+
+        <div class="demanda-edit-record-section">
+          <div class="section-title">Histórico</div>
+          <div id="demandaEditHistory" class="demanda-edit-record-list">
+            ${(d.historico||[]).slice().reverse().map(h => `
+              <div class="demanda-edit-history-item">
+                <span>${fmtDate(h.data)}</span>
+                <span>—</span>
+                <strong>${escapeHTML(h.texto||'')}</strong>
+              </div>`).join('') || '<div class="empty demanda-edit-empty">Sem histórico.</div>'}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="demanda-edit-panel" role="tabpanel" data-demand-edit-panel="documentos" hidden>
+      <div class="demanda-edit-panel-head">
+        <div><strong>Documentos da demanda</strong><span>Consulte os arquivos existentes ou envie novos documentos.</span></div>
+      </div>
+      <div id="demandaEditDocs" class="demanda-edit-record-list">${d.id ? UI.skeletonList(3, 'demanda-edit-skeleton') : '<div class="empty demanda-edit-empty">Salve a demanda primeiro para adicionar documentos.</div>'}</div>
+      <div class="file-upload demanda-edit-file-upload">
+        <label class="file-upload-label" for="demandaEditDocFile">
+          <i class="fa-solid fa-paperclip"></i> Escolher arquivo
+        </label>
+        <span class="file-upload-hint" id="demandaEditDocHint">Nenhum arquivo selecionado</span>
+        <input type="file" id="demandaEditDocFile" ${d.id ? '' : 'disabled'}/>
+        <button type="button" class="btn btn-primary btn-sm" id="demandaEditDocAdd" ${d.id ? '' : 'disabled'}><i class="fa-solid fa-upload"></i> Enviar</button>
+      </div>
+    </section>
+
+    <section class="demanda-edit-panel" role="tabpanel" data-demand-edit-panel="os" hidden>
+      <div class="demanda-edit-panel-head">
+        <div><strong>Ordens de Serviço</strong><span>Veja as OS vinculadas a esta demanda e abra os detalhes quando necessário.</span></div>
+        <button type="button" class="btn btn-sm btn-primary demanda-edit-os-add" id="demandaEditNewOS" ${d.id ? '' : 'disabled'}><i class="fa-solid fa-plus"></i> Nova OS</button>
+      </div>
+      <div id="demandaEditOS" class="demanda-edit-record-list">${d.id ? UI.skeletonList(2, 'demanda-edit-skeleton') : '<div class="empty demanda-edit-empty">Salve a demanda primeiro para criar uma OS.</div>'}</div>
+    </section>
   </form>`;
 };
 
